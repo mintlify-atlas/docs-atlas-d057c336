@@ -1,0 +1,183 @@
+---
+title: "SimpleWebTransport: WebSocket Transport for Mirror"
+description: "SimpleWebTransport is the only built-in Mirror transport for WebGL browser games. Covers SSL setup, nginx reverse proxy, and port configuration."
+---
+
+`SimpleWebTransport` provides WebSocket connectivity for Mirror. It is the **only built-in transport that works inside a browser**, making it a requirement for any WebGL game. Unlike KCP (UDP) or Telepathy (raw TCP), WebSockets are a first-class browser primitive — the browser's sandboxed networking stack allows them without any special permissions or plugins.
+
+The component is in the `Mirror.SimpleWeb` namespace and ships as part of the [SimpleWebTransport](https://github.com/MirrorNetworking/SimpleWebTransport) library, which is bundled with Mirror.
+
+<Note>
+`SimpleWebTransport` requires **Unity 2022.3 LTS or newer** for WebGL projects. Older Unity versions will raise a compile error if you reference the component in a WebGL build.
+</Note>
+
+## Why WebSockets for browser games
+
+WebGL builds run inside the browser's JavaScript sandbox, which prohibits raw TCP and UDP sockets. The only networking primitives available are the `WebSocket` and `XMLHttpRequest` browser APIs. `SimpleWebTransport` uses the `WebSocket` API, which means:
+
+- The **client** in WebGL uses the browser's native WebSocket implementation.
+- The **server** (running outside the browser) uses a C# WebSocket server backed by `SimpleWebServer`.
+- All traffic is TCP-based and framed with WebSocket protocol headers.
+
+[Castaways](https://www.castaways.com/), a sandbox survival game built on Mirror, runs entirely in the browser using this transport. [Portals](https://theportal.to/) is another example of a browser-based Mirror game using WebSockets.
+
+## Platform support
+
+| Platform | Client | Server |
+|----------|--------|--------|
+| WebGL (browser) | Yes | — |
+| Windows, macOS, Linux | Yes | Yes |
+| iOS, Android | Yes | — (mobile as client) |
+| Consoles | Yes | — |
+
+`SimpleWebTransport.Available()` always returns `true` because the component works on every platform — on non-browser platforms it falls back to the C# WebSocket client.
+
+## Configuration reference
+
+All properties are exposed in the Inspector on the **Simple Web Transport** component.
+
+### Message limits
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `maxMessageSize` | `16384` bytes (16 KB) | Maximum message size for both send and receive. Protects against allocation attacks |
+| `maxHandshakeSize` | `16384` bytes (16 KB) | Maximum size of the HTTP upgrade handshake headers |
+
+### Throughput
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `serverMaxMsgsPerTick` | `10000` | Server messages processed per Unity tick |
+| `clientMaxMsgsPerTick` | `1000` | Client messages processed per Unity tick |
+| `maxSendQueueSize` | `1000` | Maximum queued messages before the connection is closed |
+
+### Timeouts and delays
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `sendTimeout` | `5000` ms | Maximum time a send may block; prevents stalls on severed connections |
+| `receiveTimeout` | `20000` ms | Idle timeout before disconnecting a client |
+| `noDelay` | `true` | Disables Nagle's algorithm; reduces latency at the cost of bandwidth |
+
+### Server settings
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `port` | `27777` | Port the server listens on for WebSocket connections |
+| `batchSend` | `true` | Group queued messages before calling `Stream.Send`, reducing syscall overhead |
+| `waitBeforeSend` | `true` | Wait 1 ms before sending, giving Mirror time to fill the batch. Implies `batchSend = true` |
+
+### Client settings
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `clientUseWss` | `false` | Force the client to connect with `wss://` (secure WebSocket) even if `sslEnabled` is false. Use this when TLS is handled outside the transport (reverse proxy) |
+| `clientWebsocketSettings` | — | Fine-grained client port control: use the same port as the server, match the webpage's protocol port, or specify a custom port |
+
+### SSL settings (direct TLS, not reverse proxy)
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `sslEnabled` | `false` | Enable TLS directly in the transport using a certificate file. Not recommended for production — use a reverse proxy instead |
+| `sslProtocols` | `Tls12` | SSL/TLS protocol version |
+| `sslCertJson` | `./cert.json` | Path to a JSON file containing the certificate path and password. See `.cert.example.Json` in the transport folder for the expected format |
+
+## Port configuration
+
+The default port for `SimpleWebTransport` is **27777**, not 7777, to avoid conflicting with KCP when both transports are used together in a `MultiplexTransport` setup. Change the **Port** field in the Inspector.
+
+Ensure your firewall allows **TCP** traffic on this port. If you use a reverse proxy (nginx), the proxy listens on the public-facing port (usually 80 or 443) and forwards to the internal port.
+
+## Enabling SimpleWebTransport
+
+<Steps>
+  <Step title="Remove the existing transport">
+    On your **NetworkManager** GameObject, remove the current transport component (**Kcp Transport** by default) via the component context menu.
+  </Step>
+  <Step title="Add SimpleWebTransport">
+    Click **Add Component** and search for **Simple Web Transport**. Add it to the same GameObject.
+  </Step>
+  <Step title="Assign it to the NetworkManager">
+    In the **Network Manager** component, drag the new **Simple Web Transport** component into the **Transport** field.
+  </Step>
+  <Step title="Set the port">
+    In the **Simple Web Transport** component, confirm or change the **Port** field (default 27777).
+  </Step>
+  <Step title="Build for WebGL">
+    Switch your Unity build target to **WebGL** (**File → Build Settings → WebGL → Switch Platform**) and build normally. No additional code changes are required — Mirror detects the WebGL platform and uses the browser's WebSocket API automatically.
+  </Step>
+</Steps>
+
+## SSL and secure WebSockets (wss://)
+
+Production deployments require `wss://` (WebSocket Secure). Browsers increasingly block mixed-content connections, and HTTPS pages cannot open `ws://` connections. There are two ways to add TLS.
+
+### Option A: Reverse proxy (recommended)
+
+Place nginx (or any other reverse proxy) in front of the transport and let it handle TLS termination. The transport itself runs `ws://` on an internal port; nginx upgrades the connection to `wss://` for external clients.
+
+```nginx
+# /etc/nginx/sites-available/mirror-game
+server {
+    listen 443 ssl;
+    server_name yourgame.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/yourgame.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourgame.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:27777;
+        proxy_http_version 1.1;
+
+        # Required for WebSocket upgrade
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+    }
+}
+```
+
+In the Unity component, leave `sslEnabled` unchecked but set `clientUseWss = true` so the client connects with `wss://`. The server-to-proxy hop remains unencrypted on localhost.
+
+<Tip>
+Use [Let's Encrypt](https://letsencrypt.org/) with `certbot --nginx` for a free, auto-renewing TLS certificate. This is the most common production setup for Mirror WebGL games.
+</Tip>
+
+### Option B: Direct TLS in the transport
+
+Enable `sslEnabled` on the component and point `sslCertJson` to a JSON file that contains the path to your `.pfx` certificate and its password. See `.cert.example.Json` in the `SimpleWeb` transport folder for the exact schema.
+
+<Warning>
+The `sslEnabled` path loads the certificate on the server and handles TLS in managed C# code. This approach is harder to rotate certificates on and is not recommended for public-facing production servers. The reverse proxy approach gives you the full power of battle-tested TLS stacks like OpenSSL.
+</Warning>
+
+## Using SimpleWebTransport alongside KCP (MultiplexTransport)
+
+If you want the same server to handle both native desktop clients (via KCP/UDP) and browser clients (via WebSocket), use `MultiplexTransport`:
+
+<Steps>
+  <Step title="Add both transports">
+    Add **Kcp Transport** (port 7777) and **Simple Web Transport** (port 27777) as separate components on the NetworkManager GameObject.
+  </Step>
+  <Step title="Add MultiplexTransport">
+    Add a **Multiplex Transport** component. In the **Transports** list, add both components.
+  </Step>
+  <Step title="Assign MultiplexTransport to NetworkManager">
+    Set the **Network Manager → Transport** field to the **Multiplex Transport** component.
+  </Step>
+</Steps>
+
+The server now listens on both ports. Native clients connect via KCP; browser clients connect via WebSocket. Mirror's connection IDs are remapped by the multiplex layer so game code does not need to know which transport a client used.
+
+## Comparison with KCP and Telepathy
+
+| | `SimpleWebTransport` | `KcpTransport` | `TelepathyTransport` |
+|-|----------------------|----------------|----------------------|
+| Protocol | WebSocket (TCP) | UDP (KCP) | TCP |
+| WebGL | Yes | No | No |
+| Channels | Reliable only | Reliable + Unreliable | Reliable only |
+| TLS | Via proxy or `sslEnabled` | No | No |
+| Default port | 27777 | 7777 | 7777 |
+| Best for | Browser / WebGL games | Action games | Turn-based games |

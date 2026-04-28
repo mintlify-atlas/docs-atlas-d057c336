@@ -1,0 +1,173 @@
+---
+title: "Interest Management: Scalable Observer Control"
+description: "Reduce bandwidth by controlling which objects each client sees. Compare Mirror's Distance, SpatialHashing, Scene, Match, and Team interest management strategies."
+---
+
+Without interest management, every spawned `NetworkIdentity` is broadcast to every connected client. For small games with a handful of players that is fine, but as world size or player count grows, the bandwidth and CPU cost of sending all objects to all clients becomes prohibitive. Interest management lets the server decide, per object and per connection, whether a client should receive updates for that object.
+
+Mirror's interest management system is built on `InterestManagementBase`, an abstract `MonoBehaviour` you attach to the same `GameObject` as `NetworkManager`. When enabled, it sets itself as the authority for `NetworkServer.aoi` and `NetworkClient.aoi`. The server calls `Rebuild` on each `NetworkIdentity` at the configured interval to recalculate the observer set, and calls `OnCheckObserver` whenever a new connection tries to observe an object.
+
+## Available strategies
+
+Mirror ships five built-in strategies, each in its own subdirectory under `Components/InterestManagement`.
+
+<Tabs>
+  <Tab title="Distance">
+    `DistanceInterestManagement` performs a brute-force `Vector3.Distance` check between every connection's player position and each object's position every `rebuildInterval` seconds.
+
+    <ParamField path="visRange" type="int" default="500">
+      Objects farther than this many units from a player's character are invisible to that player.
+    </ParamField>
+
+    <ParamField path="rebuildInterval" type="float" default="1">
+      How often (in seconds) the full observer set is recalculated for all spawned identities.
+    </ParamField>
+
+    Per-object overrides are available via `DistanceInterestManagementCustomRange`, a lightweight component you attach to any `NetworkIdentity` to give it a different `visRange` without changing the global default.
+
+    ```csharp
+    // Attach DistanceInterestManagement to the NetworkManager GameObject.
+    // Set visRange = 100 for a small arena, or 500+ for an open world.
+    ```
+
+    **Best for:** small-to-medium games (up to a few hundred connections) where objects are distributed across a 3D space and a simple radius check is sufficient.
+  </Tab>
+  <Tab title="SpatialHashing">
+    `SpatialHashingInterestManagement` maps player positions to a 2D grid and checks only the 9 neighbouring cells (the player's own cell plus the 8 surrounding ones). Grid lookup is O(1) compared to the O(n²) brute-force check, making it 30× faster in benchmarks and capable of handling thousands of connections.
+
+    <ParamField path="visRange" type="int" default="30">
+      Visibility radius in world units. The cell resolution is automatically set to `visRange / 2` so that 9 neighbouring cells cover exactly the desired range.
+    </ParamField>
+
+    <ParamField path="rebuildInterval" type="float" default="1">
+      Observer rebuild frequency. The grid itself is refreshed every `Update` to keep player positions current; the full observer rebuild happens on this interval.
+    </ParamField>
+
+    <ParamField path="checkMethod" type="CheckMethod" default="XZ_FOR_3D">
+      `XZ_FOR_3D` for standard 3D games (ignores vertical distance); `XY_FOR_2D` for top-down or side-scrolling 2D games.
+    </ParamField>
+
+    ```csharp
+    // Cell size is derived automatically: resolution = visRange / 2
+    // For visRange = 30: resolution = 15, so 9 cells cover 30 units.
+    ```
+
+    **Best for:** large open-world games or battle royale titles with hundreds or thousands of players, especially on a dedicated server where CPU cost matters.
+
+    <Tip>
+      Mirror also ships `SpatialHashing3DInterestManagement`, `HexSpatialHash2DInterestManagement`, and `HexSpatialHash3DInterestManagement` for games that require true 3D or hex-grid visibility.
+    </Tip>
+  </Tab>
+  <Tab title="Scene">
+    `SceneInterestManagement` makes players visible only to other players in the same additive Unity scene. It is the right choice for games that use scene-based zones, dungeons, or instances.
+
+    No distance configuration is needed. As long as two connections are in the same loaded scene, they observe each other's objects.
+
+    **Best for:** MMO-style zone servers, dungeon instances, or lobby systems where visibility is binary (same scene = visible, different scene = invisible).
+  </Tab>
+  <Tab title="Match">
+    `MatchInterestManagement` uses a `[SyncVar] Guid matchId` on each `NetworkIdentity` to group objects. Players only see objects whose `matchId` matches their own.
+
+    **Best for:** games with parallel matches or rooms — a battle arena, a card game, or a racing game where each session is completely isolated from others on the same server process.
+  </Tab>
+  <Tab title="Team">
+    `TeamInterestManagement` scopes visibility to a team identifier on each object. Useful when you want allies to see each other but not enemies (e.g., fog-of-war strategy games).
+
+    **Best for:** team-based games where two groups occupy the same space but should not see each other's hidden units.
+  </Tab>
+</Tabs>
+
+## Adding interest management to NetworkManager
+
+<Steps>
+  <Step title="Choose a strategy">
+    Decide which built-in strategy matches your game, or plan to write a custom one.
+  </Step>
+  <Step title="Add the component">
+    Select the `GameObject` that holds your `NetworkManager`. In the Inspector, click **Add Component** and search for the strategy name, for example **Distance Interest Management**.
+  </Step>
+  <Step title="Configure parameters">
+    Set `visRange`, `rebuildInterval`, and any other fields appropriate for your world scale. A `rebuildInterval` of `1` second is a safe starting point; lower values increase accuracy at the cost of CPU time.
+  </Step>
+  <Step title="Test in the editor">
+    Run as host and open the **Network Stats** window. Watch the bytes-per-second drop as players move beyond the visibility radius.
+  </Step>
+</Steps>
+
+<Warning>
+  Only attach **one** interest management component per `NetworkManager`. `InterestManagementBase.OnEnable` overwrites `NetworkServer.aoi` and `NetworkClient.aoi`. Multiple components will silently overwrite each other.
+</Warning>
+
+## Custom interest management
+
+To implement your own strategy — raycast-based line-of-sight, team visibility, or a custom grid — subclass `InterestManagementBase` and implement the two abstract methods.
+
+```csharp
+using Mirror;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class LineOfSightInterestManagement : InterestManagementBase
+{
+    [Tooltip("Maximum visibility distance for ray checks.")]
+    public float maxDistance = 100f;
+
+    public override bool OnCheckObserver(NetworkIdentity identity, NetworkConnectionToClient newObserver)
+    {
+        // Called when a new connection joins. Return true to add as observer.
+        if (newObserver.identity == null) return false;
+
+        Vector3 from = newObserver.identity.transform.position;
+        Vector3 to   = identity.transform.position;
+
+        if (Vector3.Distance(from, to) > maxDistance) return false;
+
+        // Perform a line-of-sight check
+        return !Physics.Linecast(from, to, LayerMask.GetMask("Obstacles"));
+    }
+
+    public override void Rebuild(NetworkIdentity identity, bool initialize)
+    {
+        // Called periodically. Add/remove observers based on current state.
+        foreach (NetworkConnectionToClient conn in NetworkServer.connections.Values)
+        {
+            if (conn?.identity == null) continue;
+
+            if (OnCheckObserver(identity, conn))
+                AddObserver(conn, identity);
+            else
+                RemoveObserver(conn, identity);
+        }
+    }
+}
+```
+
+Use the protected helpers `AddObserver(conn, identity)` and `RemoveObserver(conn, identity)` provided by `InterestManagementBase` — they keep both `connection.observing` and `identity.observers` consistent.
+
+## When to use each strategy
+
+| Game type | Recommended strategy |
+|---|---|
+| Small arena or lobby (&lt; 50 players) | None (default: all see all) |
+| Open world, 3D, up to ~500 players | `DistanceInterestManagement` |
+| Large open world or battle royale | `SpatialHashingInterestManagement` |
+| 2D top-down game | `SpatialHashingInterestManagement` (XY mode) |
+| Zone/instance-based MMO | `SceneInterestManagement` |
+| Parallel match rooms | `MatchInterestManagement` |
+| Team-based fog of war | `TeamInterestManagement` |
+| Custom visibility (line of sight, etc.) | Subclass `InterestManagementBase` |
+
+<Note>
+  Interest management only affects which clients **receive** state updates for an object. It does not affect `[Command]` routing or `[TargetRpc]` calls, which are addressed directly to a connection.
+</Note>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="NetworkManager" icon="server" href="/components/network-manager">
+    Attach interest management to the same GameObject as NetworkManager
+  </Card>
+  <Card title="NetworkTransform" icon="arrows-up-down-left-right" href="/components/network-transform">
+    Bandwidth savings from interest management complement NetworkTransform compression
+  </Card>
+</CardGroup>

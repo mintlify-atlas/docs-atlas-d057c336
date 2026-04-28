@@ -1,0 +1,146 @@
+---
+title: "NetworkTransform: Syncing Position and Rotation"
+description: "Compare NetworkTransformReliable, Unreliable, and Hybrid to choose the right sync strategy for movement fidelity, bandwidth, and latency in your game."
+---
+
+`NetworkTransform` is the standard Mirror component for synchronizing a `GameObject`'s position, rotation, and scale across all connected clients. It uses snapshot interpolation so remote objects move smoothly even under packet loss or jitter, rather than teleporting to each new position as it arrives.
+
+Mirror ships three concrete variants, all sharing the same `NetworkTransformBase` base class. You pick the variant that matches your game's movement requirements and add it to any `GameObject` that has a `NetworkIdentity`.
+
+## Variants
+
+<Tabs>
+  <Tab title="NetworkTransformReliable">
+    `NetworkTransformReliable` uses **delta compression** against the previous serialized snapshot and sends updates over the reliable channel. Changes are only sent when the position or rotation exceeds a configurable precision threshold, which means small sub-centimeter jitter does not generate any network traffic.
+
+    Key properties:
+
+    - `positionPrecision` (default `0.01`) — position is quantized to this many meters before delta-compressing. 1 cm precision roughly halves bandwidth compared to sending raw floats.
+    - `scalePrecision` (default `0.01`) — same quantization for scale.
+    - `rotationSensitivity` (default `0.01`) — minimum rotation change before an update is sent.
+    - `onlySyncOnChangeCorrectionMultiplier` (default `2`) — after the object stops moving, corrects stale snapshots that lingered in the buffer.
+
+    **Best for:** objects that move infrequently or in short bursts — doors, projectiles, NPCs on patrol paths, or anything where missing an update would cause a visible position error.
+  </Tab>
+  <Tab title="NetworkTransformUnreliable">
+    `NetworkTransformUnreliable` broadcasts position and rotation on the unreliable channel at every send interval. Packets may arrive out of order or be dropped; Mirror discards stale snapshots automatically. A `bufferResetMultiplier` clears the interpolation buffer when the object has been idle for that many send intervals.
+
+    Key properties:
+
+    - `positionSensitivity` (default `0.01`) — minimum position delta before sending.
+    - `rotationSensitivity` (default `0.01`) — minimum rotation delta before sending.
+    - `scaleSensitivity` (default `0.01`) — minimum scale delta before sending.
+    - `bufferResetMultiplier` (default `3`) — number of send intervals of silence before the snapshot buffer is cleared to prevent stale interpolation.
+
+    **Best for:** fast-moving objects like player characters or vehicles where the latest position matters more than delivery guarantees, and where a missed packet is quickly replaced by the next one.
+  </Tab>
+  <Tab title="NetworkTransformHybrid">
+    `NetworkTransformHybrid` combines elements of both approaches: it sends position unreliably for low latency but sends rotation reliably to avoid visible snapping on direction changes. This is a good middle ground for character controllers that rotate frequently but need smooth directional changes.
+
+    Use this variant when you notice `NetworkTransformUnreliable` causing visible rotation jitter and `NetworkTransformReliable` introducing noticeable movement lag.
+  </Tab>
+</Tabs>
+
+## Shared configuration
+
+All three variants inherit from `NetworkTransformBase` and expose the same core settings.
+
+### Selective sync
+
+<ParamField path="syncPosition" type="bool" default="true">
+  Synchronize the `Transform`'s position. Disable for objects whose position is determined by physics on every client.
+</ParamField>
+
+<ParamField path="syncRotation" type="bool" default="true">
+  Synchronize rotation. Disabling this is useful for objects that always face a fixed direction.
+</ParamField>
+
+<ParamField path="syncScale" type="bool" default="false">
+  Synchronize scale. Off by default because scale changes are rare and relatively expensive to sync. Not supported in `CoordinateSpace.World` mode because Unity does not expose a writable world scale.
+</ParamField>
+
+<Warning>
+  Do not change `syncPosition`, `syncRotation`, or `syncScale` at runtime. The comment in source reads: "do not change at runtime!" Changing them after initialization produces undefined serialization behavior.
+</Warning>
+
+### Sync direction
+
+`SyncDirection` controls which side owns the authoritative state:
+
+- **ServerToClient** (default) — the server moves the object and broadcasts to clients. Use this for NPCs, world objects, and anything the server controls.
+- **ClientToServer** — the owning client sends its transform to the server, which relays it to other clients. Use this for player-controlled objects.
+
+```csharp
+// Set in the Inspector, or at runtime before the object is spawned:
+GetComponent<NetworkTransformReliable>().syncDirection = SyncDirection.ClientToServer;
+```
+
+### Compression
+
+<ParamField path="compressRotation" type="bool" default="true">
+  Applies smallest-three quaternion compression, reducing rotation from 16 bytes to 4 bytes per update. The compression is lossy but imperceptible in most games. Disable if your game requires sub-degree rotation accuracy.
+</ParamField>
+
+<ParamField path="onlySyncOnChange" type="bool" default="true">
+  Skips sending an update if nothing has changed beyond the sensitivity threshold. This is the most effective single setting for reducing bandwidth on idle objects.
+</ParamField>
+
+### Interpolation
+
+<ParamField path="interpolatePosition" type="bool" default="true">
+  Smoothly interpolates between received position snapshots. Disable for snap-like teleport behavior.
+</ParamField>
+
+<ParamField path="interpolateRotation" type="bool" default="true">
+  Smoothly interpolates between received rotation snapshots. Disable for instant directional snapping.
+</ParamField>
+
+<ParamField path="interpolateScale" type="bool" default="true">
+  Smoothly interpolates scale changes. Disable for immediate scale changes, such as sprite flipping via negative X scale.
+</ParamField>
+
+### Coordinate space
+
+<ParamField path="coordinateSpace" type="CoordinateSpace" default="Local">
+  `Local` syncs `localPosition` / `localRotation` / `localScale`. `World` syncs world-space values and is better for objects that change parent hierarchies at runtime. `syncScale` is force-disabled in `World` mode.
+</ParamField>
+
+### Update method
+
+<ParamField path="updateMethod" type="UpdateMethod" default="Update">
+  When the component samples and applies snapshots: `Update`, `FixedUpdate`, or `LateUpdate`. Use `FixedUpdate` for objects driven by a non-kinematic `Rigidbody`.
+</ParamField>
+
+## Choosing a variant
+
+| Scenario | Recommended variant |
+|---|---|
+| Player character (fast, frequent movement) | `NetworkTransformUnreliable` |
+| Player character (frequent rotation changes) | `NetworkTransformHybrid` |
+| Slow NPC, door, or elevator | `NetworkTransformReliable` |
+| Projectile (only needs latest position) | `NetworkTransformUnreliable` |
+| Object that teleports or has precise placement | `NetworkTransformReliable` |
+
+<Tip>
+  When optimizing bandwidth, start with `onlySyncOnChange = true` and set `positionPrecision` to the largest value that is imperceptible in your camera's field of view. A precision of `0.1` (10 cm) combined with delta compression can cut bandwidth to roughly one-quarter of the naive float approach.
+</Tip>
+
+## Syncing a child transform
+
+Set the `target` field to any child `Transform` instead of the root. This lets you sync a weapon bone or camera rig independently from the player root. The `target` defaults to the component's own `transform` when left unassigned.
+
+```csharp
+// Assign in the Inspector, or at runtime before spawning:
+GetComponent<NetworkTransformReliable>().target = weaponBone;
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="NetworkManager" icon="server" href="/components/network-manager">
+    Configure send rate and snapshot interpolation globally
+  </Card>
+  <Card title="NetworkAnimator" icon="person-walking" href="/components/network-animator">
+    Sync Mecanim animation parameters alongside transform data
+  </Card>
+</CardGroup>

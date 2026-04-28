@@ -1,0 +1,133 @@
+---
+title: "Hosting Mirror: Edgegap, Linux, and Docker Deployment"
+description: "Deploy Mirror dedicated servers to the cloud with Edgegap's Unity plugin, or self-host on Linux with headless builds and manual port configuration."
+---
+
+Mirror games need a server accessible to players. You have two main paths: cloud hosting via Edgegap's Unity integration (two-click deploy) or a self-managed Linux dedicated server. Both use the same Mirror build — the difference is where it runs and how players find it.
+
+## Headless server builds
+
+A Mirror server runs without a display. Enable headless mode so the server starts automatically when launched without a GPU:
+
+```csharp NetworkManager.cs (Inspector)
+// In the NetworkManager Inspector, set:
+// Auto-Start Options → Headless Start Mode → AutoStartServer
+```
+
+Or set it in code:
+
+```csharp
+networkManager.headlessStartMode = HeadlessStartOptions.AutoStartServer;
+```
+
+When Unity detects it is running in batchmode (no graphics device), `NetworkManager` calls `StartServer()` automatically. Build your server using **File → Build Settings → Server Build** (checked).
+
+<Tip>
+  For a server-only build, enable **Server Build** in Build Settings. This strips out graphics/audio and produces a much smaller binary.
+</Tip>
+
+## Edgegap cloud hosting
+
+Edgegap is integrated directly into the Unity Editor. It containerizes your server build and deploys it globally to the nearest edge node for each player.
+
+<Steps>
+  <Step title="Install the Edgegap plugin">
+    Mirror includes the Edgegap plugin under `Assets/Mirror/Hosting/Edgegap/`. Open the **Edgegap** window from the Unity menu: **Mirror → Edgegap Hosting**.
+  </Step>
+  <Step title="Sign in to Edgegap">
+    Create a free account at [edgegap.com](https://edgegap.com) and paste your API token into the plugin window.
+  </Step>
+  <Step title="Build and push">
+    Click **Build and Push**. The plugin builds a Linux server, packages it into a Docker container, and pushes it to Edgegap's registry.
+  </Step>
+  <Step title="Deploy a server">
+    Click **Deploy**. Edgegap starts a server instance. Copy the IP and port, then connect your client to it.
+  </Step>
+</Steps>
+
+<Note>
+  Edgegap has a free tier suitable for development and small games. Check [edgegap.com/pricing](https://edgegap.com/pricing) for production plans.
+</Note>
+
+## Self-hosted Linux server
+
+For full control, run your server on a VPS or dedicated machine.
+
+### Build for Linux
+
+In **Build Settings**, switch Platform to **Linux**, check **Server Build**, and click **Build**.
+
+### Run the server
+
+```bash
+chmod +x MyGame.x86_64
+./MyGame.x86_64 -batchmode -nographics -logFile server.log
+```
+
+### Port configuration
+
+Mirror's default ports:
+
+| Transport | Default Port | Protocol |
+|---|---|---|
+| KCP | 7777 | UDP |
+| Telepathy | 7777 | TCP |
+| SimpleWeb | 27777 | TCP (WS) |
+
+Open the required port on your firewall/security group. For UDP (KCP), open both inbound and outbound on that port.
+
+```bash
+# Linux ufw example
+ufw allow 7777/udp   # KCP
+ufw allow 7777/tcp   # Telepathy
+ufw allow 27777/tcp  # WebSocket
+```
+
+### Environment-based configuration
+
+Pass the network address and port at launch using Unity's command-line argument system:
+
+```csharp CommandLineArgs.cs
+void Awake()
+{
+    string[] args = System.Environment.GetCommandLineArgs();
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == "-port" && i + 1 < args.Length)
+            GetComponent<TelepathyTransport>().port =
+                ushort.Parse(args[i + 1]);
+    }
+}
+```
+
+Launch with:
+```bash
+./MyGame.x86_64 -batchmode -nographics -port 7778
+```
+
+## Docker
+
+A simple `Dockerfile` for a Mirror server:
+
+```dockerfile Dockerfile
+FROM ubuntu:22.04
+WORKDIR /app
+COPY Build/ .
+RUN chmod +x MyGame.x86_64
+EXPOSE 7777/udp
+CMD ["./MyGame.x86_64", "-batchmode", "-nographics", "-logFile", "-"]
+```
+
+```bash
+docker build -t mygame-server .
+docker run -p 7777:7777/udp mygame-server
+```
+
+<CardGroup cols={2}>
+  <Card title="Transports" icon="network-wired" href="/transports/overview">
+    Choose the right transport for your infrastructure
+  </Card>
+  <Card title="Authentication" icon="lock" href="/advanced/authentication">
+    Secure your server before accepting players
+  </Card>
+</CardGroup>

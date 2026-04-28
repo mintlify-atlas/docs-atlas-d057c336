@@ -1,0 +1,114 @@
+---
+title: "Telepathy TCP Transport for Mirror Networking"
+description: "TelepathyTransport gives Mirror reliable ordered TCP connections. Learn when to choose TCP over UDP and how to configure it for your game."
+---
+
+`TelepathyTransport` wraps the [Telepathy](https://github.com/MirrorNetworking/Telepathy) TCP library, which Mirror's original author wrote specifically for game networking. It uses a framing protocol that prefixes every message with a 4-byte length header (network byte order), making it straightforward to implement on custom servers or debugging tools that speak the same wire format. Telepathy was Mirror's default transport until November 2020, when KCP replaced it for general use.
+
+## When to use TCP
+
+TCP is a reasonable choice when latency is not the primary concern and simplicity matters more than raw performance:
+
+- **Turn-based games** — card games, strategy games, and board games where moves happen once per player turn tolerate hundreds of milliseconds of round-trip time without affecting gameplay.
+- **Text-heavy MMOs** — chat, trade, and inventory operations are infrequent and order-sensitive, which is exactly what TCP provides for free.
+- **Corporate or education environments** — UDP is commonly blocked by firewalls, whereas TCP port 7777 usually passes through without special rules.
+- **Debugging and tooling** — TCP's ordered, reliable delivery makes it easier to replay recorded traffic and reproduce bugs deterministically.
+
+<Warning>
+Telepathy does not expose an unreliable channel. Every message sent through `TelepathyTransport` is delivered on `Channels.Reliable`. If your game relies on `Channels.Unreliable` for snapshot interpolation or physics replication, use `KcpTransport` instead.
+</Warning>
+
+## Platform support
+
+Telepathy uses C#'s built-in `System.Net.Sockets.TcpClient`, which runs on all platforms except WebGL.
+
+| Platform | Supported |
+|----------|-----------|
+| Windows, macOS, Linux | Yes |
+| iOS, Android | Yes |
+| Consoles | Yes |
+| WebGL | No |
+
+## Configuration reference
+
+All properties below are exposed in the Inspector on the **Telepathy Transport** component.
+
+### Common
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `port` | `7777` | TCP port the server listens on and clients connect to |
+| `NoDelay` | `true` | Disables Nagle's algorithm on the TCP socket, reducing latency at the cost of slightly more small packets |
+| `SendTimeout` | `5000` ms | How long a send operation may block before the connection is considered broken |
+| `ReceiveTimeout` | `30000` ms | How long a connection may be idle before it is disconnected. Set high by default to survive scene transitions |
+
+### Server
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `serverMaxMessageSize` | `16384` bytes (16 KB) | Maximum allowed incoming message size. Protects against allocation attacks where a malicious client sends a fake packet with a 2 GB header |
+| `serverMaxReceivesPerTick` | `10000` | Maximum messages the server processes per Unity tick to prevent a runaway receive loop |
+| `serverSendQueueLimitPerConnection` | `10000` | If a client's send queue exceeds this limit the server disconnects it, shedding load from slow clients |
+| `serverReceiveQueueLimitPerConnection` | `10000` | If a client's receive queue exceeds this limit the server disconnects it |
+
+### Client
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `clientMaxMessageSize` | `16384` bytes (16 KB) | Maximum allowed incoming message size on the client. Protects against a malicious server |
+| `clientMaxReceivesPerTick` | `1000` | Maximum messages the client processes per tick |
+| `clientSendQueueLimit` | `10000` | Client disconnects itself if its send queue grows past this limit, avoiding unbounded memory growth |
+| `clientReceiveQueueLimit` | `10000` | Client disconnects itself if its receive queue grows past this limit |
+
+## Max message size
+
+`TelepathyTransport.GetMaxPacketSize()` returns `serverMaxMessageSize` (16 KB by default). If you need to send larger payloads — for example, a large initial world state on join — increase both `serverMaxMessageSize` and `clientMaxMessageSize` to the same value.
+
+<Note>
+Increasing the max message size also increases the maximum allocation a single malicious packet can trigger. Balance this against your security requirements. For most games, 16 KB is sufficient; Mirror handles batching of smaller messages automatically.
+</Note>
+
+## Port configuration
+
+The server binds to `port` on all available interfaces. Clients connect to the address you supply to `NetworkManager.networkAddress` on the same port. To change the port:
+
+1. Select the GameObject with **Telepathy Transport** in the Inspector.
+2. Change the **Port** field.
+3. Ensure your firewall allows **TCP** traffic on that port.
+
+## Attaching Telepathy to the NetworkManager
+
+<Steps>
+  <Step title="Add the component">
+    On your **NetworkManager** GameObject, click **Add Component** and search for **Telepathy Transport**. Add it.
+  </Step>
+  <Step title="Remove the existing transport">
+    If a **Kcp Transport** component is already present, remove it via the component context menu (three-dot icon → **Remove Component**).
+  </Step>
+  <Step title="Assign it to the NetworkManager">
+    In the **Network Manager** component, drag the **Telepathy Transport** component into the **Transport** field.
+  </Step>
+  <Step title="Set the port">
+    In the **Telepathy Transport** component, set **Port** to the TCP port your server will use.
+  </Step>
+  <Step title="Verify with a local test">
+    Press **Play**, call `NetworkManager.singleton.StartHost()`, and confirm the server starts on the expected port. You can use `netstat -an | grep 7777` (or your chosen port) on the server machine to verify the TCP listener is active.
+  </Step>
+</Steps>
+
+## Queue limits and back-pressure
+
+Telepathy manages separate in-memory queues for pending sends and pending receives on both the server and client. When a queue reaches its limit, Telepathy disconnects the affected connection rather than letting it grow unboundedly. This is intentional load shedding: it is better to kick one slow client than to slow down the entire server.
+
+If you see unexpected disconnections under load, check whether your server is hitting `serverSendQueueLimitPerConnection` or `serverReceiveQueueLimitPerConnection`. Increase these values cautiously, or reduce your message rate.
+
+## Comparison with KCP
+
+| | `TelepathyTransport` | `KcpTransport` |
+|-|----------------------|----------------|
+| Protocol | TCP | UDP (KCP) |
+| Channels | Reliable only | Reliable + Unreliable |
+| Latency profile | Higher (TCP ACK batching) | Lower (no Nagle, 10ms tick) |
+| NAT traversal | Port forward required | Port forward required |
+| WebGL | No | No |
+| Best for | Turn-based, text-heavy games | Action, real-time games |

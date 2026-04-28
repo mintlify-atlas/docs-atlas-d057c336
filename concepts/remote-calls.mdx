@@ -1,0 +1,272 @@
+---
+title: "Remote Calls: Commands, ClientRpcs, and TargetRpcs"
+description: "Learn how Mirror's [Command], [ClientRpc], and [TargetRpc] work — covering authority, channel selection, and zero-overhead Weaver IL post-processing."
+---
+
+Remote procedure calls (RPCs) are Mirror's mechanism for triggering code across the server/client boundary. Rather than sending raw messages, you annotate ordinary C# methods with attributes and call them as if they were local — Mirror's Weaver rewrites them at compile time to transmit the call and its parameters over the network. There is no runtime reflection, no boxing for common types, and no boilerplate serialization code.
+
+There are three RPC types, each with a distinct direction:
+
+| Attribute | Who calls it | Where it runs |
+|---|---|---|
+| `[Command]` | Client | Server |
+| `[ClientRpc]` | Server | All clients |
+| `[TargetRpc]` | Server | One specific client |
+
+All three must be declared inside a class that extends `NetworkBehaviour`.
+
+## [Command] — client to server
+
+`[Command]` lets an owning client invoke a method on the server. Use it for player actions: requesting a move, firing a weapon, picking up an item.
+
+```csharp Player.cs
+public class Player : NetworkBehaviour
+{
+    [Command]
+    void CmdFireWeapon(Vector3 direction)
+    {
+        // Runs on the server. Validate before trusting.
+        if (!CanFire()) return;
+        ServerSpawnProjectile(direction);
+        RpcPlayMuzzleFlash();
+    }
+
+    void Update()
+    {
+        if (!isLocalPlayer) return;
+        if (Input.GetButtonDown("Fire1"))
+            CmdFireWeapon(transform.forward);
+    }
+}
+```
+
+### requiresAuthority
+
+By default `[Command]` requires the caller to be the object's owner (`requiresAuthority = true`). Set it to `false` to allow any client to call the command — useful for interactable world objects:
+
+```csharp Door.cs
+public class Door : NetworkBehaviour
+{
+    [Command(requiresAuthority = false)]
+    void CmdRequestOpen(NetworkConnectionToClient sender = null)
+    {
+        // Any client can request to open the door.
+        // 'sender' is injected by Mirror automatically.
+        if (CanOpen(sender))
+            ServerOpen();
+    }
+}
+```
+
+<Note>
+When `requiresAuthority = false`, Mirror injects the sender connection as the last parameter if you declare it as `NetworkConnectionToClient sender = null`. This lets you know which client called the command.
+</Note>
+
+<Warning>
+Always validate command parameters on the server. A client can send any values it likes; never trust them blindly.
+</Warning>
+
+## [ClientRpc] — server to all clients
+
+`[ClientRpc]` broadcasts a call from the server to every connected client that is observing the object. Use it for events all clients need to react to: explosions, sound effects, score updates.
+
+```csharp Explosion.cs
+public class Explosion : NetworkBehaviour
+{
+    [ClientRpc]
+    void RpcExplode(Vector3 position, float radius)
+    {
+        // Runs on every observing client.
+        // Play VFX, shake camera, apply client-side physics.
+        ParticleSystem.Emit(50);
+        CameraShake.Trigger(radius);
+    }
+
+    [Server]
+    void ServerDetonate()
+    {
+        // Broadcast to all clients
+        RpcExplode(transform.position, blastRadius);
+        NetworkServer.Destroy(gameObject);
+    }
+}
+```
+
+### includeOwner
+
+By default the RPC is sent to all observers **including** the owner (`includeOwner = true`). Set `includeOwner = false` to skip the owning client — useful when the owner already played the effect locally:
+
+```csharp
+[ClientRpc(includeOwner = false)]
+void RpcPlayHitEffect(Vector3 hitPoint)
+{
+    // Skips the player who fired — they already saw it locally.
+    SpawnBloodDecal(hitPoint);
+}
+```
+
+## [TargetRpc] — server to one client
+
+`[TargetRpc]` sends a call from the server to a single, specific client connection. Use it for private messages, targeted game events, or responses to a specific player's command.
+
+```csharp Chest.cs
+public class Chest : NetworkBehaviour
+{
+    [TargetRpc]
+    void TargetReceiveLoot(NetworkConnection target, string[] items)
+    {
+        // Runs only on the client identified by 'target'.
+        foreach (string item in items)
+            Inventory.Add(item);
+        UIManager.ShowLootPanel(items);
+    }
+
+    [Command]
+    void CmdOpenChest()
+    {
+        string[] loot = GenerateLoot();
+        // Send loot only to the player who opened the chest
+        TargetReceiveLoot(connectionToClient, loot);
+    }
+}
+```
+
+<Note>
+The first parameter of a `[TargetRpc]` method must be `NetworkConnection target`. Mirror injects the connection at call time and strips it before delivery so the receiving client's method runs with only the remaining parameters.
+</Note>
+
+If you pass `null` as the connection, Mirror automatically uses `connectionToClient` (the owner's connection).
+
+## Channel parameter
+
+All three attributes accept a `channel` parameter to choose between reliable and unreliable delivery:
+
+<Tabs>
+  <Tab title="Channels.Reliable (default)">
+    ```csharp
+    // Guaranteed delivery, ordered. Use for important game events.
+    [Command(channel = Channels.Reliable)]
+    void CmdPickupItem(uint itemNetId) { /* ... */ }
+
+    [ClientRpc(channel = Channels.Reliable)]
+    void RpcPlayerDied(string playerName) { /* ... */ }
+    ```
+  </Tab>
+  <Tab title="Channels.Unreliable">
+    ```csharp
+    // Best-effort, unordered. Use for high-frequency data where drops are acceptable.
+    [Command(channel = Channels.Unreliable)]
+    void CmdSendAimDirection(Vector3 dir) { /* ... */ }
+
+    [ClientRpc(channel = Channels.Unreliable)]
+    void RpcUpdatePosition(Vector3 pos) { /* ... */ }
+    ```
+  </Tab>
+</Tabs>
+
+Use `Channels.Unreliable` for data sent many times per second where a missed packet is immediately superseded by the next one (aim direction, footstep positions). Use `Channels.Reliable` for anything that must arrive exactly once (death events, item pickups, chat messages).
+
+## IL post-processing — zero overhead
+
+Mirror uses a **Weaver** (Unity's IL post-processor) to rewrite `[Command]`, `[ClientRpc]`, and `[TargetRpc]` methods at compile time. The generated code:
+
+1. Serializes all parameters into a `NetworkWriter` using Mirror's existing writer system.
+2. Sends a `CommandMessage` or `RpcMessage` over the connection.
+3. On the receiver, deserializes the parameters and calls the original method body.
+
+This happens entirely at the IL level — there is no `MethodInfo.Invoke`, no boxing for primitive types, and no per-frame allocation. Calling a command has the same overhead as calling a regular method plus the network serialization cost of its parameters.
+
+Remote calls are identified by a stable 16-bit hash derived from the full class and method name (`ClassName.MethodName`), preventing collisions between methods of the same name on different classes.
+
+## Common patterns
+
+<AccordionGroup>
+  <Accordion title="CmdRequestAction — validate then execute">
+    The most common command pattern: client requests an action, server validates, then broadcasts the result.
+
+    ```csharp
+    [Command]
+    void CmdUseAbility(int abilityId)
+    {
+        // Server validates
+        if (!abilities.IsUnlocked(abilityId)) return;
+        if (cooldowns.IsOnCooldown(abilityId)) return;
+
+        cooldowns.StartCooldown(abilityId);
+        ServerApplyAbilityEffect(abilityId);
+        RpcPlayAbilityEffect(abilityId); // notify all clients
+    }
+
+    [ClientRpc]
+    void RpcPlayAbilityEffect(int abilityId)
+    {
+        animator.SetTrigger($"ability_{abilityId}");
+        audioSource.PlayOneShot(abilitySounds[abilityId]);
+    }
+    ```
+  </Accordion>
+  <Accordion title="RpcPlayEffect — broadcast visual feedback">
+    Keep visual and audio effects on the client and trigger them via RPC so the server never needs to know about renderers or audio sources:
+
+    ```csharp
+    [ClientRpc]
+    void RpcSpawnImpactEffect(Vector3 position, int materialType)
+    {
+        GameObject vfx = Instantiate(impactPrefabs[materialType], position, Quaternion.identity);
+        Destroy(vfx, 3f);
+    }
+    ```
+  </Accordion>
+  <Accordion title="TargetRpc for private responses">
+    Use `[TargetRpc]` to reply to a specific player without broadcasting to everyone:
+
+    ```csharp
+    [Command]
+    void CmdRequestQuestState(int questId)
+    {
+        QuestState state = QuestManager.GetState(connectionToClient, questId);
+        TargetReceiveQuestState(connectionToClient, questId, state);
+    }
+
+    [TargetRpc]
+    void TargetReceiveQuestState(NetworkConnection target, int questId, QuestState state)
+    {
+        QuestUI.UpdateQuest(questId, state);
+    }
+    ```
+  </Accordion>
+  <Accordion title="Command on a non-owned object">
+    Use `requiresAuthority = false` when you want any client to interact with an object they don't own, such as a door or terminal:
+
+    ```csharp
+    [Command(requiresAuthority = false)]
+    void CmdInteract(NetworkConnectionToClient sender = null)
+    {
+        if (!interactCooldown.IsReady(sender)) return;
+        ServerActivate();
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Things to avoid
+
+- **Don't call a `[Command]` from the server.** Commands are client-to-server only. Calling a command method directly on the server calls the method locally but does not send a network message — this can produce confusing behavior.
+- **Don't call a `[ClientRpc]` from the client.** Rpc methods are server-to-client only. Mirror checks `NetworkServer.active` and logs an error if you attempt this.
+- **Avoid sending large payloads per frame via RPCs.** For high-frequency state (positions, rotations), use `[SyncVar]` or `NetworkTransform` instead.
+- **Don't pass complex reference types without custom writers.** Arrays, `List<T>`, and other collections require Mirror to have a registered `NetworkWriter` for the element type. Use simple value types, registered structs, or the built-in supported types.
+
+<CardGroup cols={2}>
+  <Card title="NetworkBehaviour" icon="code" href="/concepts/network-behaviour">
+    Lifecycle, context properties, and guard attributes
+  </Card>
+  <Card title="SyncVars and syncing" icon="arrows-rotate" href="/concepts/syncvars-and-syncing">
+    State replication with SyncVar and sync collections
+  </Card>
+  <Card title="NetworkIdentity" icon="fingerprint" href="/concepts/network-identity">
+    Object identity, ownership, and observer management
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/getting-started/quickstart">
+    Build your first networked scene from scratch
+  </Card>
+</CardGroup>

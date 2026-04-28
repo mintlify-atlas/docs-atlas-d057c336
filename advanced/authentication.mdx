@@ -1,0 +1,254 @@
+---
+title: "Network Authentication in Mirror Multiplayer Games"
+description: "Gate connections with NetworkAuthenticator to verify passwords, device IDs, or tokens before Mirror spawns a player object on the server."
+---
+
+Before Mirror spawns a player object or allows a client to send game messages, your server can run an authentication handshake. The `NetworkAuthenticator` base class intercepts every new connection after the transport handshake but before `OnServerConnect` fires, giving you a clean window to exchange credentials, verify tokens, or enforce lobby rules without any risk of unauthenticated clients accessing gameplay code.
+
+## How authentication fits into the connection lifecycle
+
+When a client connects, Mirror holds it in a pending state. Your authenticator exchanges custom `NetworkMessage` structs with the client. Once you call `ServerAccept(conn)`, Mirror considers the connection authenticated and continues with player spawning. If you call `ServerReject(conn)`, the connection is dropped immediately.
+
+```
+Client connects
+     │
+     ▼
+OnServerAuthenticate(conn)   ← your authenticator runs here
+     │
+  ┌──┴──────────────────┐
+  │                     │
+ServerAccept(conn)   ServerReject(conn)
+  │                     │
+Player spawns       Connection dropped
+```
+
+## Attaching an authenticator to NetworkManager
+
+<Steps>
+  <Step title="Add a NetworkAuthenticator component">
+    Select your **NetworkManager** GameObject in the Hierarchy. Click **Add Component** and choose one of the built-in authenticators under **Network > Authenticators**, or add your own subclass.
+  </Step>
+  <Step title="Confirm automatic wiring">
+    When you add the component to the same GameObject as `NetworkManager`, it auto-assigns itself to the `NetworkManager.authenticator` field. You can verify this in the Inspector under **Authenticator**.
+  </Step>
+  <Step title="Configure credentials">
+    Set any credentials or options exposed by the authenticator in the Inspector. For `BasicAuthenticator`, fill in `serverUsername` and `serverPassword` on the server-side fields.
+  </Step>
+</Steps>
+
+<Note>
+  If you remove an authenticator later, manually clear the `NetworkManager.authenticator` field in the Inspector. The component does **not** remove itself automatically when deleted.
+</Note>
+
+## Built-in authenticators
+
+<Tabs>
+  <Tab title="BasicAuthenticator">
+    `BasicAuthenticator` checks a username/password pair against values you configure directly on the component. It is the simplest option for password-protected servers and small projects where credential management happens outside the game.
+
+    **Inspector fields**
+
+    | Field | Side | Purpose |
+    |-------|------|---------|
+    | `serverUsername` | Server | Expected username sent by clients |
+    | `serverPassword` | Server | Expected password sent by clients |
+    | `username` | Client | Username this client sends on connect |
+    | `password` | Client | Password this client sends on connect |
+
+    The authenticator sends an `AuthRequestMessage` from client to server, and an `AuthResponseMessage` back. Code `100` means success; code `200` means invalid credentials.
+
+    ```csharp
+    // BasicAuthenticator message types (already defined in the component)
+    public struct AuthRequestMessage : NetworkMessage
+    {
+        public string authUsername;
+        public string authPassword;
+    }
+
+    public struct AuthResponseMessage : NetworkMessage
+    {
+        public byte code;    // 100 = success, 200 = failure
+        public string message;
+    }
+    ```
+
+    <Warning>
+      `BasicAuthenticator` stores credentials in plain text in your scene. Do not use it for games where security matters — use it for quick prototypes or internal tools only.
+    </Warning>
+  </Tab>
+  <Tab title="TimeoutAuthenticator">
+    `TimeoutAuthenticator` wraps another authenticator and automatically disconnects clients that fail to complete authentication within a configurable time limit. It does not perform authentication itself; it delegates to the inner authenticator.
+
+    **Inspector fields**
+
+    | Field | Purpose |
+    |-------|---------|
+    | `authenticator` | The real authenticator to delegate to |
+    | `timeout` | Seconds before a pending connection is dropped (0 = disabled) |
+
+    ```csharp
+    // TimeoutAuthenticator delegates to an inner authenticator:
+    public NetworkAuthenticator authenticator; // assign in Inspector
+    public float timeout = 60;                 // 0–600 seconds
+    ```
+
+    Assign `TimeoutAuthenticator` to `NetworkManager.authenticator`, then assign your real authenticator (e.g. `BasicAuthenticator`) to the `TimeoutAuthenticator.authenticator` field.
+  </Tab>
+  <Tab title="DeviceAuthenticator">
+    `DeviceAuthenticator` identifies each client by `SystemInfo.deviceUniqueIdentifier`. On platforms where that is not available, it generates and persists a GUID in `PlayerPrefs`. The device ID is stored in `conn.authenticationData` after authentication so you can read it later.
+
+    ```csharp
+    // Server-side: read the device ID after authentication
+    public override void OnServerAddPlayer(NetworkConnectionToClient conn)
+    {
+        string deviceId = (string)conn.authenticationData;
+        // use deviceId to look up saved player data, ban lists, etc.
+        base.OnServerAddPlayer(conn);
+    }
+    ```
+
+    <Warning>
+      `SystemInfo.deviceUniqueIdentifier` can be spoofed on rooted/jailbroken devices. Do not rely on it for anti-cheat or payment verification.
+    </Warning>
+  </Tab>
+  <Tab title="UniqueNameAuthenticator">
+    `UniqueNameAuthenticator` enforces that every connected client has a distinct player name. If a client tries to join with a name already in use, the server rejects it and fires the `OnAuthFailure` event.
+
+    **Inspector fields**
+
+    | Field | Purpose |
+    |-------|---------|
+    | `playerName` | The name this client sends (set from your UI) |
+    | `OnAuthSuccess` | `UnityEvent<string>` fired on the client when accepted |
+    | `OnAuthFailure` | `UnityEvent<string>` fired on the client when rejected |
+
+    Wire a text input field to `SetPlayername(string)` to let players enter their name before connecting:
+
+    ```csharp
+    // Example: hook up a UI InputField
+    public TMP_InputField nameInput;
+    UniqueNameAuthenticator auth;
+
+    void Start()
+    {
+        auth = FindObjectOfType<UniqueNameAuthenticator>();
+        nameInput.onValueChanged.AddListener(auth.SetPlayername);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Writing a custom authenticator
+
+Extend `NetworkAuthenticator` and override `OnServerAuthenticate` / `OnClientAuthenticate`. Register and unregister your custom `NetworkMessage` handlers in `OnStartServer` / `OnStopServer` (and the client equivalents).
+
+```csharp
+using Mirror;
+using UnityEngine;
+
+public class TokenAuthenticator : NetworkAuthenticator
+{
+    [Header("Server")]
+    public string validToken = "secret-token";
+
+    // --- Message types ---
+    public struct TokenRequest : NetworkMessage { public string token; }
+    public struct TokenResponse : NetworkMessage { public bool success; }
+
+    // --- Server ---
+
+    public override void OnStartServer()
+    {
+        NetworkServer.RegisterHandler<TokenRequest>(OnTokenRequest, requireAuthentication: false);
+    }
+
+    public override void OnStopServer()
+    {
+        NetworkServer.UnregisterHandler<TokenRequest>();
+    }
+
+    public override void OnServerAuthenticate(NetworkConnectionToClient conn)
+    {
+        // Wait for the client to send a TokenRequest message.
+        // Do nothing here; the handler below does the work.
+    }
+
+    void OnTokenRequest(NetworkConnectionToClient conn, TokenRequest msg)
+    {
+        if (msg.token == validToken)
+        {
+            conn.Send(new TokenResponse { success = true });
+            ServerAccept(conn); // ← signals Mirror to proceed
+        }
+        else
+        {
+            conn.Send(new TokenResponse { success = false });
+            ServerReject(conn); // ← disconnects the client
+        }
+    }
+
+    // --- Client ---
+
+    public override void OnStartClient()
+    {
+        NetworkClient.RegisterHandler<TokenResponse>(OnTokenResponse, requireAuthentication: false);
+    }
+
+    public override void OnStopClient()
+    {
+        NetworkClient.UnregisterHandler<TokenResponse>();
+    }
+
+    public override void OnClientAuthenticate()
+    {
+        // Client sends credentials as soon as authentication begins.
+        NetworkClient.Send(new TokenRequest { token = validToken });
+    }
+
+    void OnTokenResponse(TokenResponse msg)
+    {
+        if (msg.success)
+            ClientAccept(); // ← signals Mirror that client-side auth passed
+        else
+            ClientReject(); // ← disconnects and sets isAuthenticated = false
+    }
+}
+```
+
+### Key methods at a glance
+
+| Method | Called on | Purpose |
+|--------|-----------|---------|
+| `OnServerAuthenticate(conn)` | Server | Entry point when a client needs to authenticate; typically waits for a message |
+| `OnClientAuthenticate()` | Client | Entry point on the client; typically sends credentials |
+| `ServerAccept(conn)` | Server | Marks connection as authenticated, allows Mirror to continue |
+| `ServerReject(conn)` | Server | Disconnects the client |
+| `ClientAccept()` | Client | Fires `OnClientAuthenticated`, unblocks local flow |
+| `ClientReject()` | Client | Sets `isAuthenticated = false` and disconnects |
+
+<Note>
+  Always register message handlers with `requireAuthentication: false`. Authentication messages arrive before the connection is authenticated, so Mirror would silently drop them if the flag were `true`.
+</Note>
+
+## Use cases
+
+<Tabs>
+  <Tab title="Password-protected server">
+    Use `BasicAuthenticator` for quick password protection, or a custom authenticator that hashes and salts passwords before comparing. Store the expected hash server-side and never send it to clients.
+  </Tab>
+  <Tab title="Lobby / matchmaking token">
+    Issue a short-lived JWT or opaque token from your matchmaking backend. The client receives the token after being placed in a match and sends it during `OnClientAuthenticate`. The server validates it against your backend before calling `ServerAccept`.
+  </Tab>
+  <Tab title="Steam authentication">
+    Use Steamworks to generate an auth ticket on the client (`SteamUser.GetAuthTicketForWebApi`). Send the ticket bytes as a `NetworkMessage`. The server calls `SteamGameServer.BeginAuthSession` to verify it, then calls `ServerAccept` or `ServerReject` based on the result.
+  </Tab>
+</Tabs>
+
+<CardGroup cols={2}>
+  <Card title="NetworkManager" href="/components/network-manager">
+    Configure the authenticator field and connection limits.
+  </Card>
+  <Card title="NetworkBehaviour" href="/concepts/network-behaviour">
+    Access `conn.authenticationData` inside player scripts to read stored credentials.
+  </Card>
+</CardGroup>

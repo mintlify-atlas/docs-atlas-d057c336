@@ -1,0 +1,160 @@
+---
+title: "NetworkManager: Managing Connection Lifecycle"
+description: "NetworkManager is Mirror's central hub for server/client start modes, scene management, player spawning, and connection events in your multiplayer game."
+---
+
+`NetworkManager` is a `MonoBehaviour` component that acts as the single entry point for your multiplayer session. It handles starting and stopping the server or client, loading online and offline scenes, spawning the player prefab, and exposing a rich set of virtual callbacks for you to extend. Add it to one persistent `GameObject` in your project — Mirror enforces that only one instance exists at a time.
+
+## Inspector fields
+
+<ParamField path="networkAddress" type="string" default="localhost">
+  The address clients connect to. Only used by the client; the server binds to all interfaces.
+</ParamField>
+
+<ParamField path="maxConnections" type="int" default="100">
+  Maximum concurrent connections. Passed directly to the transport layer via `NetworkServer.Listen(maxConnections)`.
+</ParamField>
+
+<ParamField path="playerPrefab" type="GameObject">
+  The prefab instantiated for each connecting player. Must have a `NetworkIdentity` component. Do not add it to `spawnPrefabs` — Mirror warns you if you do.
+</ParamField>
+
+<ParamField path="offlineScene" type="string">
+  Scene loaded automatically when the client or server stops. Leave blank to stay in the current scene.
+</ParamField>
+
+<ParamField path="onlineScene" type="string">
+  Scene loaded when the server starts. All connecting clients receive a `SceneMessage` instructing them to load it.
+</ParamField>
+
+<ParamField path="autoCreatePlayer" type="bool" default="true">
+  When true, Mirror calls `NetworkClient.AddPlayer()` automatically after the client is ready, triggering `OnServerAddPlayer` on the server.
+</ParamField>
+
+<ParamField path="playerSpawnMethod" type="PlayerSpawnMethod" default="Random">
+  Controls how `GetStartPosition()` picks from registered `NetworkStartPosition` transforms. `Random` selects randomly; `RoundRobin` cycles through them in hierarchy order.
+</ParamField>
+
+<ParamField path="sendRate" type="int" default="60">
+  Server and client broadcast frequency per second. Use 60–100 Hz for fast-paced games, ~30 Hz for moderately paced games, and 1–10 Hz for slow-paced games.
+</ParamField>
+
+<ParamField path="headlessStartMode" type="HeadlessStartOptions" default="DoNothing">
+  Determines what happens automatically in a headless (server) build: `DoNothing`, `AutoStartServer`, or `AutoStartClient`.
+</ParamField>
+
+<ParamField path="dontDestroyOnLoad" type="bool" default="true">
+  Preserves the `NetworkManager` across scene changes via `DontDestroyOnLoad`. Disable this if each scene has its own `NetworkManager`.
+</ParamField>
+
+## Start modes
+
+`NetworkManager` exposes three top-level start methods. Call them from UI buttons or from your own game flow scripts.
+
+```csharp
+// Start as server-only (dedicated server, no local client)
+NetworkManager.singleton.StartServer();
+
+// Start as client and connect to networkAddress
+NetworkManager.singleton.StartClient();
+
+// Start as host: server + local client in one process
+NetworkManager.singleton.StartHost();
+```
+
+To stop a session:
+
+```csharp
+NetworkManager.singleton.StopServer();
+NetworkManager.singleton.StopClient();
+NetworkManager.singleton.StopHost();
+```
+
+## Headless server support
+
+In a server-only build, Unity runs without a display. Mirror detects this with `Utils.IsHeadless()` and reads the `headlessStartMode` field in `Start()`. Set it to `AutoStartServer` to skip a launch UI entirely:
+
+```csharp
+// In the Inspector, set headlessStartMode = AutoStartServer
+// Mirror's NetworkManager.Start() calls StartServer() automatically.
+```
+
+Enable `editorAutoStart` if you also want this behavior in the Editor — useful when iterating on server logic without clicking a button every run.
+
+<Note>
+  Headless builds still need a `Transport` component attached to the same `GameObject` as `NetworkManager`. KCP is the default high-performance choice for UDP games.
+</Note>
+
+## Key virtual methods
+
+Subclass `NetworkManager` and override these methods to add your game's logic. Always call `base.*` where noted to preserve default behavior.
+
+| Method | Called when |
+|---|---|
+| `OnStartServer()` | Server finishes starting (before scene load completes) |
+| `OnStartClient()` | Client starts connecting |
+| `OnStartHost()` | Host mode is fully initialized |
+| `OnServerConnect(conn)` | A new client successfully authenticates |
+| `OnServerDisconnect(conn)` | A client disconnects (default destroys the player object) |
+| `OnServerReady(conn)` | A client signals it has loaded the scene |
+| `OnServerAddPlayer(conn)` | Client requests a player object |
+| `OnClientConnect()` | Client connects and authenticates |
+| `OnClientDisconnect()` | Client disconnects from the server |
+| `OnStopServer()` | Server is stopping |
+| `OnStopClient()` | Client is stopping |
+
+## Player spawning
+
+### Overriding OnServerAddPlayer
+
+The default `OnServerAddPlayer` instantiates `playerPrefab` at the next `NetworkStartPosition` and calls `NetworkServer.AddPlayerForConnection`. Override it to load player data from a database, pick a custom prefab, or spawn at a specific location:
+
+```csharp
+public class GameNetworkManager : NetworkManager
+{
+    public override void OnServerAddPlayer(NetworkConnectionToClient conn)
+    {
+        // Pick spawn position using the base helper
+        Transform startPos = GetStartPosition();
+
+        GameObject player = startPos != null
+            ? Instantiate(playerPrefab, startPos.position, startPos.rotation)
+            : Instantiate(playerPrefab);
+
+        // Assign a unique display name from the connection ID
+        player.GetComponent<PlayerData>().playerName = $"Player {conn.connectionId}";
+
+        NetworkServer.AddPlayerForConnection(conn, player);
+    }
+}
+```
+
+### PlayerSpawnMethod
+
+Place `NetworkStartPosition` components in your online scene. `GetStartPosition()` reads `playerSpawnMethod` to decide the order:
+
+- **Random** — picks any registered position at random each time.
+- **RoundRobin** — cycles through positions in their sibling index order, wrapping around.
+
+<Tip>
+  `NetworkStartPosition` registers itself automatically in `Awake`. You don't need to call `RegisterStartPosition` manually.
+</Tip>
+
+## NetworkManager HUD
+
+The `NetworkManagerHUD` component renders a minimal runtime UI directly in the Game view using `OnGUI`. Attach it to the same `GameObject` as `NetworkManager` during development to quickly toggle Host, Server, Client, and Stop without writing any UI code.
+
+<Warning>
+  Remove or disable `NetworkManagerHUD` before shipping. It is intended only for prototyping and does not handle authentication, localization, or your game's visual design.
+</Warning>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="NetworkTransform" icon="arrows-up-down-left-right" href="/components/network-transform">
+    Sync position, rotation, and scale across the network
+  </Card>
+  <Card title="Interest Management" icon="eye" href="/components/interest-management">
+    Limit which objects each client receives updates for
+  </Card>
+</CardGroup>

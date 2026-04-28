@@ -1,0 +1,153 @@
+---
+title: "Lag Compensation: Accurate Server-Side Hit Detection"
+description: "Mirror's lag compensation rolls back server state to the moment a client fired, so hit detection accounts for the player's view delay and network latency."
+---
+
+In fast-paced multiplayer games, players aim at where they *see* an enemy, but by the time the shot message reaches the server, the enemy has moved. Lag compensation solves this by rewinding server state back to the moment the client fired, checking for a hit against the world as the player saw it.
+
+## How it works
+
+The server continuously records snapshots of game objects' positions (a *history*). When a `[Command]` arrives for a shot, Mirror estimates when the client fired based on round-trip time and the snapshot interpolation buffer time, then samples the history at that moment to reconstruct the past world state. The hit check runs against that reconstructed state rather than the current one.
+
+```
+Client fires at T=1.000 (sees enemy at position A)
+  → packet travels 50ms
+Server receives at T=1.050 (enemy is now at position B)
+  → lag compensation: reconstruct state at T=1.000
+  → enemy was at position A → hit confirmed ✓
+```
+
+## Core API
+
+Mirror's `LagCompensation` static class provides the sampling logic:
+
+```csharp LagCompensation.cs
+// Estimate the time the client was at when they fired
+double estimatedTime = LagCompensation.EstimateTime(
+    NetworkServer.time,          // current server time
+    connectionToClient.rtt,      // round trip time
+    NetworkClient.bufferTime     // snapshot interpolation buffer
+);
+
+// Sample the history at that time
+if (LagCompensation.Sample(
+    history,           // Queue<KeyValuePair<double, Capture>>
+    estimatedTime,
+    captureInterval,
+    out MyCapture before,
+    out MyCapture after,
+    out double t))
+{
+    // Interpolate between before and after using t
+    Vector3 hitboxCenter = Vector3.Lerp(before.position, after.position, (float)t);
+    // Run your hit check against hitboxCenter
+}
+```
+
+## Setting up lag compensation
+
+<Steps>
+  <Step title="Create a Capture type">
+    Define a struct that holds the state you need to rewind. Extend `Capture`:
+
+    ```csharp
+    public struct HitboxCapture : Capture
+    {
+        public double timestamp { get; set; }
+        public Vector3 position;
+        public Quaternion rotation;
+
+        public void DrawGizmo()
+        {
+            // Optional: draw in Scene view for debugging
+            Gizmos.DrawWireSphere(position, 0.5f);
+        }
+    }
+    ```
+  </Step>
+  <Step title="Record history on the server">
+    In `Update` or `FixedUpdate` on the server, insert a snapshot:
+
+    ```csharp
+    // On the server, every frame (or every N frames)
+    void Update()
+    {
+        if (!isServer) return;
+
+        LagCompensation.Insert(
+            history,
+            historyLimit: 64,
+            NetworkTime.localTime,
+            new HitboxCapture
+            {
+                timestamp = NetworkTime.localTime,
+                position = transform.position,
+                rotation = transform.rotation
+            }
+        );
+    }
+
+    readonly Queue<KeyValuePair<double, HitboxCapture>> history =
+        new Queue<KeyValuePair<double, HitboxCapture>>();
+    ```
+  </Step>
+  <Step title="Sample history in your Command">
+    When a hit command arrives from a client, estimate the firing time and sample:
+
+    ```csharp
+    [Command]
+    void CmdFire(Vector3 aimDirection)
+    {
+        double estimatedTime = LagCompensation.EstimateTime(
+            NetworkTime.time,
+            connectionToClient.rtt,
+            NetworkClient.bufferTime
+        );
+
+        if (LagCompensation.Sample(history, estimatedTime, captureInterval,
+            out HitboxCapture before, out HitboxCapture after, out double t))
+        {
+            Vector3 pastPosition = Vector3.Lerp(before.position, after.position, (float)t);
+
+            // Run hit detection against pastPosition
+            if (Physics.Raycast(transform.position, aimDirection, out RaycastHit hit))
+            {
+                if (hit.collider.bounds.Contains(pastPosition))
+                    ApplyDamage(hit.collider.GetComponent<Health>());
+            }
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Time estimation
+
+`LagCompensation.EstimateTime` uses the Valve networking model formula:
+
+```
+estimatedTime = serverTime - (rtt / 2) - bufferTime
+```
+
+This accounts for:
+- **One-way latency** (`rtt / 2`): how long the packet took to arrive
+- **Buffer time**: how far behind the client was rendering due to snapshot interpolation
+
+<Warning>
+  Mirror never trusts the client to report the time. Always use `EstimateTime` on the server to compute when the client fired. Accepting a client-supplied timestamp would allow cheaters to rewind arbitrarily far into the past.
+</Warning>
+
+## Limitations
+
+- Lag compensation only helps with **detection** (raycasts, sphere casts). Physics simulation is not rewound.
+- Very high latency (>300ms) may produce unreliable results. Consider capping the maximum rewind window.
+- Objects that move unpredictably (e.g., physics-driven) need a higher capture frequency for accurate sampling.
+
+<CardGroup cols={2}>
+  <Card title="Snapshot Interpolation" icon="waveform-lines" href="/advanced/snapshot-interpolation">
+    How Mirror smooths received movement
+  </Card>
+  <Card title="Remote Calls" icon="arrow-right-arrow-left" href="/concepts/remote-calls">
+    Commands and RPCs for sending game actions
+  </Card>
+</CardGroup>

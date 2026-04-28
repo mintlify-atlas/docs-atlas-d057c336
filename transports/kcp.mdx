@@ -1,0 +1,130 @@
+---
+title: "KCP Transport: Reliable UDP for Mirror Networking"
+description: "KcpTransport is Mirror's default reliable UDP transport via kcp2k. Low latency, allocation-free, and the best choice for most desktop and mobile games."
+---
+
+`KcpTransport` is Mirror's default transport. It implements reliable delivery on top of UDP using the [kcp2k](https://github.com/MirrorNetworking/kcp2k) library — a C# port of the battle-tested KCP congestion-control algorithm. Because UDP skips TCP's kernel-level acknowledgement machinery, KCP achieves significantly lower round-trip latency while still guaranteeing ordered, reliable delivery on the `Reliable` channel. It also exposes an `Unreliable` channel for position updates and other data where occasional drops are acceptable.
+
+## Why KCP is the default
+
+Mirror switched from Telepathy (TCP) to KCP in November 2020 for three reasons:
+
+1. **Lower latency.** TCP's Nagle algorithm and ACK batching add latency that KCP avoids by default (`NoDelay = true`, `Interval = 10 ms`).
+2. **Unreliable channel.** KCP exposes a second channel that mirrors the raw UDP channel, enabling snapshot interpolation and lag compensation without the head-of-line blocking that plagues TCP.
+3. **Scale.** A single UDP socket handles all connections on the server, reducing OS overhead compared to one-socket-per-connection TCP.
+
+Games like [A Township Tale](https://townshiptale.com/) (Meta Quest) ship with KCP in production.
+
+## Platform support
+
+KCP is available on all platforms **except WebGL**. The browser's sandboxed networking stack does not allow raw UDP sockets. For browser-based games, use [SimpleWebTransport](/transports/websockets) instead — you can run both simultaneously with [MultiplexTransport](/transports/overview#multiplex-transport).
+
+| Platform | Supported |
+|----------|-----------|
+| Windows, macOS, Linux | Yes |
+| iOS, Android | Yes |
+| Console (Switch, PS, Xbox) | Yes (disable DualMode if IPv6 is unsupported) |
+| WebGL | No |
+
+## Configuration reference
+
+All properties below are exposed in the Inspector under the **Kcp Transport** component.
+
+### Transport Configuration
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `port` | `7777` | UDP port the server listens on and clients connect to |
+| `DualMode` | `true` | Listen on both IPv6 and IPv4 simultaneously. Disable on platforms that support IPv4 only (some consoles) |
+| `NoDelay` | `true` | Disables KCP's internal Nagle-equivalent delay. Recommended for lower latency |
+| `Interval` | `10` ms | How often KCP ticks internally. Lower values reduce latency but increase CPU usage |
+| `Timeout` | `10000` ms | Idle timeout before KCP disconnects a peer. KCP sends keepalive pings automatically |
+| `RecvBufferSize` | ~7 MB | OS-level socket receive buffer. Increase if connections drop under heavy load |
+| `SendBufferSize` | ~7 MB | OS-level socket send buffer |
+
+### Advanced
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `FastResend` | `2` | Retransmit after this many ACK skips without waiting for the full timeout. `0` = disabled, `2` = turbo mode |
+| `ReceiveWindowSize` | `4096` | Number of packets KCP buffers per connection before applying backpressure. Directly controls reliable max message size |
+| `SendWindowSize` | `4096` | Outgoing window size per connection |
+| `MaxRetransmit` | `DEADLINK × 2` | Retransmission attempts before declaring the connection dead. Doubled from the KCP default to avoid premature disconnects on poor networks |
+| `MaximizeSocketBuffers` | `true` | Automatically set socket buffers to the OS maximum at startup. Prevents buffer-too-small drops under load |
+
+### Debug
+
+| Property | Description |
+|----------|-------------|
+| `debugLog` | Enable verbose KCP internal logging to the Unity console |
+| `statisticsGUI` | Show a live send/receive statistics overlay in Play mode (Editor only) |
+| `statisticsLog` | Log statistics every second — useful for headless servers |
+
+## Max message sizes
+
+The reliable channel's maximum message size is derived from `ReceiveWindowSize`:
+
+```
+ReliableMaxMessageSize = KcpPeer.ReliableMaxMessageSize(MTU, ReceiveWindowSize)
+```
+
+With the default window size of 4096 and the standard 1200-byte MTU, this works out to roughly 144 KB per message. The unreliable channel is capped at one MTU minus the KCP header (~1184 bytes).
+
+<Note>
+Although the reliable channel supports large messages, sending near-MTU-sized batches is far more efficient than sending one 144 KB message. KCP's batching threshold is set to the unreliable MTU size to keep individual packets small and avoid head-of-line blocking.
+</Note>
+
+## Port configuration
+
+By default, both the server and client use port `7777`. To change it:
+
+1. Select the GameObject with **Kcp Transport** in the Inspector.
+2. Change the **Port** field under **Transport Configuration**.
+3. Make sure your firewall or cloud security group allows **UDP** traffic on that port — TCP rules do not apply to KCP.
+
+For hosting behind NAT, players must either forward the UDP port or use a relay transport like Edgegap.
+
+## Setting up KCP
+
+<Steps>
+  <Step title="Verify it is already attached">
+    KCP is Mirror's default transport. Open your **NetworkManager** GameObject in the Inspector — you should already see a **Kcp Transport** component and the **Transport** field pointing to it.
+  </Step>
+  <Step title="Configure the port">
+    Set the **Port** field to the UDP port your server will listen on. The same port value is used by the server to bind and by clients as the default connection port.
+  </Step>
+  <Step title="Adjust window sizes for your load">
+    For games with many networked entities, increase `ReceiveWindowSize` and `SendWindowSize`. The Mirror Benchmark uses 8192/8192 for 20,000 monsters. For typical games, the default 4096/4096 is sufficient.
+  </Step>
+  <Step title="Disable DualMode on unsupported platforms">
+    If you target platforms that do not support IPv6 (some consoles), uncheck **DualMode** to force IPv4-only listening.
+  </Step>
+  <Step title="Enable statistics for debugging">
+    During development, enable **Statistics GUI** to see live bandwidth numbers in the Play mode overlay. On headless servers, enable **Statistics Log** instead.
+  </Step>
+</Steps>
+
+## KCP vs Telepathy vs SimpleWebTransport
+
+<Tabs>
+  <Tab title="Use KCP when">
+    Your game is fast-paced and benefits from low-latency UDP (shooters, racing, action games), you need `Channels.Unreliable` for snapshot interpolation, or you target desktop, mobile, or console (not WebGL).
+  </Tab>
+  <Tab title="Use Telepathy when">
+    Your game is turn-based or latency-tolerant, you need simplest possible setup, or you operate in environments where UDP is blocked by firewalls.
+  </Tab>
+  <Tab title="Use SimpleWebTransport when">
+    You need browser (WebGL) client support. You can also combine it with KCP via `MultiplexTransport` to serve both browser and native clients from a single server port.
+  </Tab>
+</Tabs>
+
+## Channels
+
+`KcpTransport` is one of the only built-in transports that supports both of Mirror's channels:
+
+| Channel | Constant | Guarantee |
+|---------|----------|-----------|
+| Reliable | `Channels.Reliable` | Ordered, guaranteed delivery. Connection drops on repeated failure |
+| Unreliable | `Channels.Unreliable` | Best-effort, unordered. Packets may be lost or arrive out of order |
+
+Use `Channels.Unreliable` for high-frequency updates (position, rotation) where a missed packet is superseded by the next one anyway. Use `Channels.Reliable` for everything else.

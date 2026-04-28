@@ -1,0 +1,159 @@
+---
+title: "NetworkAnimator: Sync Mecanim Animations Over the Network"
+description: "NetworkAnimator synchronizes Animator parameters, state transitions, and layer weights across all clients, with support for both server and client authority."
+---
+
+`NetworkAnimator` is a Mirror component that synchronizes a Unity `Animator` over the network. It tracks changes to integer, float, and bool parameters on every `FixedUpdate`, serializes only the dirty values using a bitmask, and broadcasts them to all clients. Animation state transitions and layer weights are included automatically. Triggers, however, are not synced passively — you fire them explicitly via `SetTrigger` and `ResetTrigger` so that no trigger is ever silently missed.
+
+## Setup
+
+1. Add a `NetworkIdentity` to the `GameObject` (required for all Mirror components).
+2. Add `NetworkAnimator` alongside the existing `Animator`.
+3. Drag the `Animator` reference into the **Animator** field on `NetworkAnimator`.
+
+```csharp
+// NetworkAnimator discovers parameters automatically from animator.parameters
+// at Awake and OnEnable. No manual registration is needed.
+```
+
+<Note>
+  Parameters controlled by Animation Curves are excluded from sync automatically. `NetworkAnimator` filters them out with `animator.IsParameterControlledByCurve(par.nameHash)` during initialization.
+</Note>
+
+## Synced data
+
+`NetworkAnimator` synchronizes the following on every `FixedUpdate` when `SendMessagesAllowed` is true:
+
+| Data | How synced |
+|---|---|
+| **Int parameters** | Sent when value differs from last sent value |
+| **Float parameters** | Sent when change exceeds `0.001` |
+| **Bool parameters** | Sent when value changes |
+| **Triggers** | Sent explicitly via `SetTrigger` / `ResetTrigger` |
+| **State hash** | Sent on state transition (for `Animator.Play`) |
+| **Normalized time** | Sent alongside state hash for scrubbing |
+| **Layer weights** | Sent when weight changes by more than `0.001` |
+| **Animator.speed** | Synced via a `[SyncVar]` |
+
+On initial spawn, `OnSerialize` writes the full state — current state hash, normalized time, layer weight, and all parameters — so late-joining clients are immediately in sync.
+
+## Sync direction
+
+<ParamField path="syncDirection" type="SyncDirection" default="ClientToServer">
+  Controls who owns the animation state. `NetworkAnimator.Reset()` defaults this to `ClientToServer`, which is appropriate for player-controlled characters.
+</ParamField>
+
+<Tabs>
+  <Tab title="ServerToClient (server authority)">
+    The server drives the `Animator` and broadcasts to all clients. Use this for NPCs, enemies, or any object whose animation is fully determined by server-side logic.
+
+    ```csharp
+    // On the server, manipulate the Animator directly:
+    GetComponent<Animator>().SetBool("isRunning", true);
+
+    // Or use NetworkAnimator.SetTrigger to reliably fire a trigger on all clients:
+    GetComponent<NetworkAnimator>().SetTrigger("Attack");
+    ```
+  </Tab>
+  <Tab title="ClientToServer (client authority)">
+    The owning client drives the `Animator` locally. Changes are sent to the server via `[Command]`, then broadcast to all other clients via `[ClientRpc]`.
+
+    ```csharp
+    // On the owning client, animate normally:
+    animator.SetFloat("Speed", inputMagnitude);
+    animator.SetBool("IsGrounded", controller.isGrounded);
+
+    // Triggers must use NetworkAnimator, not Animator directly:
+    networkAnimator.SetTrigger("Jump");
+    ```
+
+    <Warning>
+      Always call `networkAnimator.SetTrigger()` instead of `animator.SetTrigger()` for networked triggers in client-authority mode. Calling the plain `Animator` method only fires on the local client; other clients never see it.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## SetTrigger and ResetTrigger
+
+Triggers are one-shot events that can be missed if sent as ordinary parameters. `NetworkAnimator` routes them through dedicated `[Command]` / `[ClientRpc]` pairs to guarantee delivery.
+
+```csharp
+NetworkAnimator netAnim = GetComponent<NetworkAnimator>();
+
+// Fire a trigger by name
+netAnim.SetTrigger("Attack");
+
+// Fire a trigger by pre-hashed ID (avoids string allocation)
+netAnim.SetTrigger(Animator.StringToHash("Attack"));
+
+// Reset a trigger that was set but not yet consumed
+netAnim.ResetTrigger("Attack");
+netAnim.ResetTrigger(Animator.StringToHash("Attack"));
+```
+
+`SetTrigger` enforces authority:
+
+- In `ClientToServer` mode, only the **owning client** can call `SetTrigger`. Calling it from a non-owning client or from the server prints a warning and does nothing.
+- In `ServerToClient` mode, only the **server** can call `SetTrigger`. Calling it from any client prints a warning.
+
+## Performance considerations
+
+- **Bandwidth** — only dirty parameters are serialized each tick. A 64-bit bitmask (`ulong dirtyBits`) covers up to 64 parameters. Parameters beyond index 63 are silently ignored; keep Animator complexity reasonable.
+- **Avoid runtime Animator swaps** — `NetworkAnimator` caches the parameter array at `Awake` and `OnEnable`. Swapping the `RuntimeAnimatorController` at runtime will cause a parameter count mismatch error on deserialization.
+- **Sync interval** — `NetworkAnimator` respects `syncInterval` inherited from `NetworkBehaviour`. Set it to `0` to sync every send tick, or raise it to reduce frequency for background NPCs.
+- **Animator.speed** — speed is synced via a `[SyncVar]`. This means it is reliable and late-join safe, but it is only updated when the speed changes by more than `0.001`.
+
+<Tip>
+  For objects that only animate occasionally (chests, doors), set `syncInterval` to `0.1` or higher. For player characters that animate every frame, keep it at `0`.
+</Tip>
+
+## Example: player animation controller
+
+```csharp
+[RequireComponent(typeof(NetworkAnimator))]
+public class PlayerAnimationController : NetworkBehaviour
+{
+    Animator animator;
+    NetworkAnimator netAnimator;
+
+    static readonly int SpeedHash   = Animator.StringToHash("Speed");
+    static readonly int JumpHash    = Animator.StringToHash("Jump");
+    static readonly int GroundedHash = Animator.StringToHash("IsGrounded");
+
+    void Awake()
+    {
+        animator    = GetComponent<Animator>();
+        netAnimator = GetComponent<NetworkAnimator>();
+    }
+
+    void Update()
+    {
+        // Only the owner drives the animation locally
+        if (!isOwned) return;
+
+        float speed = new Vector2(Input.GetAxis("Horizontal"),
+                                  Input.GetAxis("Vertical")).magnitude;
+        animator.SetFloat(SpeedHash, speed);
+        animator.SetBool(GroundedHash, IsGrounded());
+
+        if (Input.GetButtonDown("Jump"))
+        {
+            // Use NetworkAnimator, not Animator, for triggers
+            netAnimator.SetTrigger(JumpHash);
+        }
+    }
+
+    bool IsGrounded() { /* ... */ return true; }
+}
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="NetworkTransform" icon="arrows-up-down-left-right" href="/components/network-transform">
+    Sync position and rotation alongside animation
+  </Card>
+  <Card title="NetworkManager" icon="server" href="/components/network-manager">
+    Configure send rate that governs how often NetworkAnimator ticks
+  </Card>
+</CardGroup>

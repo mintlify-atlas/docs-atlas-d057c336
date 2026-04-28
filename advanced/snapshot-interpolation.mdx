@@ -1,0 +1,77 @@
+---
+title: "Snapshot Interpolation: Smooth Multiplayer Movement"
+description: "Mirror's snapshot interpolation buffers and blends past network states to eliminate jitter and packet loss, giving all players smooth, consistent movement."
+---
+
+Snapshot interpolation is Mirror's solution to the fundamental networking problem: packets arrive unevenly, but movement must look perfectly smooth. Instead of applying received positions immediately (which causes jitter whenever a packet arrives late), Mirror buffers a small queue of received states and renders a smoothly interpolated position slightly behind the live server state.
+
+## How it works
+
+Every time a `NetworkTransform` sends an update, the receiving side stores it as a *snapshot* — a timestamped record of position, rotation, and scale. The renderer then walks forward through that queue at a controlled rate, blending between snapshots rather than jumping to each one as it arrives.
+
+The key insight is the **buffer time**: the client always renders a moment slightly in the past, ensuring there are always at least a couple of snapshots ahead to interpolate toward, even when a packet arrives late.
+
+## Configuration
+
+Snapshot interpolation settings are exposed on `NetworkTransform` components and centrally in `SnapshotInterpolationSettings`:
+
+| Property | Default | Description |
+|---|---|---|
+| `bufferTimeMultiplier` | `2` | Buffer = `sendInterval × multiplier` seconds. Increase for smoother results on poor connections. |
+| `bufferLimit` | `32` | Max snapshots stored. Older ones are dropped if the client falls too far behind. |
+| `catchupNegativeThreshold` | `-1` | Frames of slack before the timeline slows down. |
+| `catchupPositiveThreshold` | `1` | Frames of lag before the timeline speeds up to catch up. |
+| `catchupSpeed` | `0.02` | How aggressively (2%) to speed up when behind. |
+| `slowdownSpeed` | `0.04` | How aggressively (4%) to slow down when ahead. |
+| `dynamicAdjustment` | `true` | Auto-tunes `bufferTimeMultiplier` based on measured jitter. |
+| `dynamicAdjustmentTolerance` | `1` | Safety frames added on top of the dynamic calculation. |
+
+<Tip>
+  Leave `dynamicAdjustment` enabled for most games. It automatically sets a low buffer multiplier on stable connections and increases it when jitter is detected, giving you both low latency and resilience without manual tuning.
+</Tip>
+
+## Dynamic buffer adjustment
+
+With `dynamicAdjustment = true`, Mirror measures the delivery time jitter using an exponential moving average and grows or shrinks the buffer automatically. On a LAN with near-zero jitter, the buffer stays small (low latency). On a mobile connection with 20% jitter, it grows to absorb the variance.
+
+You can observe this in action via the **Network Statistics** component, which shows the live `bufferTimeMultiplier` value at runtime.
+
+## Relationship to NetworkTransform
+
+Snapshot interpolation is built into `NetworkTransform`. You do not need to configure it separately — it activates as soon as you add a `NetworkTransform` component to a prefab. The settings are available in the `NetworkTransform` Inspector under the **Snapshot Interpolation** section.
+
+```csharp NetworkTransformReliable.cs (simplified)
+// Each received snapshot is stored:
+void OnServerToClientSync(Vector3 position, Quaternion rotation)
+{
+    double timestamp = NetworkClient.connection.remoteTimeStamp;
+    AddSnapshot(snapshots, timestamp, position, rotation);
+}
+
+// Each Update, we interpolate forward:
+void Update()
+{
+    if (isClient)
+        SnapshotInterpolation.Step(snapshots, time, out position, out rotation);
+}
+```
+
+## Tuning guidelines
+
+- **Stuttering / jitter**: Increase `bufferTimeMultiplier` (try 3–4). With `dynamicAdjustment` on, this should happen automatically.
+- **Movement feels delayed**: Lower `bufferTimeMultiplier`. The trade-off is less resilience to packet loss.
+- **Objects teleporting**: The buffer ran empty — either the server stopped sending, or the buffer is too small for the connection's jitter.
+- **High-frequency games (shooters)**: Use `NetworkTransformUnreliable` which is designed for fast, lossy sync.
+
+<Note>
+  Snapshot interpolation applies to received state. The local player's own object typically moves without interpolation using client-side prediction or direct input, so the local player always feels instant.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="NetworkTransform" icon="arrows-up-down-left-right" href="/components/network-transform">
+    Configure interpolation per component
+  </Card>
+  <Card title="Lag Compensation" icon="clock-rotate-left" href="/advanced/lag-compensation">
+    Roll back state for hit detection
+  </Card>
+</CardGroup>

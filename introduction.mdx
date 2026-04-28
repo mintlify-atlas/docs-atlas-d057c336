@@ -1,0 +1,97 @@
+---
+title: "Mirror Networking: Unity Multiplayer Made Simple"
+description: "Mirror is the #1 open source Unity networking library, used in production by thousands of games. Build multiplayer experiences with a stable, easy-to-use API."
+---
+
+Mirror is a high-level networking library for Unity that lets you build multiplayer games without worrying about low-level networking details. It has powered over 1,000 Steam games — from indie titles to AAA hits like Population: ONE — and serves over 100 million players worldwide.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/getting-started/quickstart">
+    Build your first networked game object in minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/getting-started/installation">
+    Add Mirror to your Unity project from the Asset Store
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/network-behaviour">
+    Understand NetworkBehaviour, SyncVars, and RPCs
+  </Card>
+  <Card title="Transports" icon="network-wired" href="/transports/overview">
+    Choose the right transport for your game
+  </Card>
+</CardGroup>
+
+## Why Mirror?
+
+Mirror was born from UNET's community edition and has been battle-tested since 2014. It prioritizes long-term API stability — your game code written today will still compile years from now.
+
+<CardGroup cols={2}>
+  <Card title="Stable API" icon="shield-check">
+    10+ years of stability. No breaking changes without clear migration paths.
+  </Card>
+  <Card title="Allocation-Free" icon="gauge-high">
+    Zero runtime allocations in the hot path. No garbage collection spikes.
+  </Card>
+  <Card title="Modular Transports" icon="plug">
+    Swap KCP, TCP, WebSockets, Steam, or community transports with one line.
+  </Card>
+  <Card title="MIT Licensed" icon="scale-balanced">
+    Completely free. No CCU costs, no royalties, no paywalls.
+  </Card>
+</CardGroup>
+
+## How it works
+
+Mirror unifies server and client into a single project. Instead of `MonoBehaviour`, you extend `NetworkBehaviour` and use Mirror's attributes to declare what gets synchronized and which methods are remote calls:
+
+```csharp Player.cs
+public class Player : NetworkBehaviour
+{
+    // Automatically synced from server to all clients
+    [SyncVar] public int health = 100;
+
+    // Client calls this → runs on server
+    [Command]
+    void CmdUseItem(int slot) { /* validated on server */ }
+
+    // Server calls this → runs on all clients
+    [ClientRpc]
+    void RpcRespawn() { /* play respawn animation */ }
+
+    void Update()
+    {
+        if (isServer) ServerUpdate();
+        if (isClient) ClientUpdate();
+    }
+}
+```
+
+## Made with Mirror
+
+Mirror powers thousands of games across every genre:
+
+- **[Population: ONE](https://www.populationonevr.com/)** — Top-rated Oculus VR battle royale, acquired by Meta
+- **[Zooba](https://play.google.com/store/apps/details?id=com.wildlife.games.battle.royale.free.zooba)** — 100M+ downloads on Google Play
+- **[Liars Bar](https://store.steampowered.com/app/3097560/Liars_Bar/)** — 20,000+ Overwhelmingly Positive reviews on Steam
+- **[Dinkum](https://store.steampowered.com/app/1062520/Dinkum/)** — Overwhelmingly Positive farming/survival game
+- **[SCP: Secret Laboratory](https://scpslgame.com/)** — 140,000+ Steam reviews
+
+## Get started
+
+<Steps>
+  <Step title="Install Mirror">
+    Download Mirror from the [Unity Asset Store](https://assetstore.unity.com/packages/tools/network/mirror-129321) or install via the Package Manager.
+  </Step>
+  <Step title="Add a NetworkManager">
+    Create a new GameObject and attach the **Network Manager** component, then add your transport of choice.
+  </Step>
+  <Step title="Create a NetworkBehaviour">
+    Replace `MonoBehaviour` with `NetworkBehaviour` on your player script and add a `NetworkIdentity` component to the prefab.
+  </Step>
+  <Step title="Add to NetworkManager">
+    Drag your player prefab into the NetworkManager's **Player Prefab** field and press Play.
+  </Step>
+</Steps>
+
+<Note>
+Mirror supports Unity 2019, 2020, 2021, 2022 LTS, and Unity 6. Check the [installation guide](/getting-started/installation) for version-specific notes.
+</Note>

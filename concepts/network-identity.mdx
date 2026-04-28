@@ -1,0 +1,225 @@
+---
+title: "NetworkIdentity: Unique Identity for Networked Objects"
+description: "Discover how NetworkIdentity assigns a unique netId to spawned objects, manages ownership and observer visibility, and ties all NetworkBehaviours together."
+---
+
+`NetworkIdentity` is the component that makes a `GameObject` visible to Mirror's networking layer. Every prefab you intend to spawn over the network — and every networked scene object — must have exactly one `NetworkIdentity`. It is the anchor point that ties together all `NetworkBehaviour` components on the object, tracks ownership, controls observer visibility, and provides the unique `netId` that identifies the object across server and clients.
+
+<Note>
+`NetworkIdentity` is sealed (`sealed class`) and cannot be subclassed. Customize networked behavior by adding `NetworkBehaviour` components instead.
+</Note>
+
+## Why every networked prefab needs it
+
+When the server calls `NetworkServer.Spawn(gameObject)`, Mirror registers the object in its spawn table using the `netId`. Clients receive a spawn message containing the `assetId` (for prefabs) or `sceneId` (for scene objects) and the current state. Without `NetworkIdentity`, Mirror has no way to look up or replicate the object.
+
+```csharp
+// Server spawns a prefab — NetworkIdentity is required on the prefab
+GameObject go = Instantiate(enemyPrefab);
+NetworkServer.Spawn(go);
+
+// Later, look up any spawned object by netId on either server or client
+if (NetworkServer.spawned.TryGetValue(netId, out NetworkIdentity identity))
+{
+    Debug.Log(identity.name);
+}
+```
+
+## netId
+
+```csharp
+public uint netId { get; internal set; }
+```
+
+A unique 32-bit unsigned integer assigned by the server at spawn time. The value is `0` before the object is spawned. The same `netId` refers to the same logical object on the server and on every connected client.
+
+```csharp
+public class EnemyHUD : NetworkBehaviour
+{
+    void OnGUI()
+    {
+        // netId is accessible from NetworkBehaviour via netIdentity.netId
+        GUILayout.Label($"netId: {netId}");
+    }
+}
+```
+
+## assetId and sceneId
+
+| Field | Type | Purpose |
+|---|---|---|
+| `assetId` | `uint` | Identifies which prefab to instantiate. Set automatically by Mirror in the Editor via the prefab's GUID. |
+| `sceneId` | `ulong` | Identifies pre-placed scene objects. Set automatically; do not modify manually. |
+
+Mirror uses `assetId` to look up the correct prefab in `NetworkManager`'s registered spawnable prefabs list when a client receives a spawn message. `sceneId` serves the same purpose for objects already present in the scene at load time.
+
+## Authority and ownership
+
+<Tabs>
+  <Tab title="isOwned">
+    `isOwned` is `true` on a client when that client's connection is the owner of the object. The server always spawns objects with a specific owner connection:
+
+    ```csharp
+    // Spawn with a specific owner
+    NetworkServer.Spawn(playerObject, connectionToClient);
+
+    // Give or take ownership later
+    identity.AssignClientAuthority(connectionToClient);
+    identity.RemoveClientAuthority();
+    ```
+  </Tab>
+  <Tab title="connectionToClient">
+    On the server, `connectionToClient` is the connection that owns the object. It is `null` for server-owned (non-player) objects:
+
+    ```csharp
+    public override void OnStartServer()
+    {
+        if (connectionToClient != null)
+            Debug.Log($"Owned by connection {connectionToClient.connectionId}");
+        else
+            Debug.Log("Server-owned object");
+    }
+    ```
+  </Tab>
+  <Tab title="connectionToServer">
+    On the client, `connectionToServer` is the client's own connection to the server. It is only valid for the local player object:
+
+    ```csharp
+    // Only valid on the local player's NetworkBehaviour
+    public override void OnStartLocalPlayer()
+    {
+        Debug.Log($"Connected via {connectionToServer}");
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Visibility
+
+The `Visibility` enum controls how interest management interacts with this object:
+
+```csharp
+public enum Visibility { Default, ForceHidden, ForceShown }
+```
+
+| Value | Behavior |
+|---|---|
+| `Default` | Use the active interest management component (e.g., distance-based) |
+| `ForceHidden` | Never send this object to any client observer — useful while an object respawns |
+| `ForceShown` | Always broadcast to every client — useful for global score displays or chat objects |
+
+Set it from code on the server:
+
+```csharp
+// Hide a boss until the encounter starts
+GetComponent<NetworkIdentity>().visibility = Visibility.ForceHidden;
+
+// Reveal it
+GetComponent<NetworkIdentity>().visibility = Visibility.Default;
+```
+
+## serverOnly
+
+```csharp
+public bool serverOnly;
+```
+
+When `true`, the object is never spawned on clients at all — it exists only on the server. Tick this in the inspector for server-side manager objects that clients have no need to know about.
+
+## Observers
+
+```csharp
+public readonly Dictionary<int, NetworkConnectionToClient> observers;
+```
+
+The server maintains the set of connections that can currently see this object. Mirror's interest management system adds and removes connections as players move. You can read the observer list but should not modify it directly.
+
+```csharp
+[Server]
+void LogObservers()
+{
+    foreach (var conn in netIdentity.observers.Values)
+        Debug.Log($"Observed by: {conn.connectionId}");
+}
+```
+
+## Getting a NetworkIdentity at runtime
+
+<Tabs>
+  <Tab title="From a NetworkBehaviour">
+    Every `NetworkBehaviour` exposes `netIdentity` as a shortcut:
+
+    ```csharp
+    NetworkIdentity id = GetComponent<NetworkBehaviour>().netIdentity;
+    ```
+  </Tab>
+  <Tab title="From a GameObject">
+    ```csharp
+    if (gameObject.TryGetComponent(out NetworkIdentity identity))
+    {
+        Debug.Log(identity.netId);
+    }
+    ```
+  </Tab>
+  <Tab title="From the server spawn table">
+    ```csharp
+    if (NetworkServer.spawned.TryGetValue(targetNetId, out NetworkIdentity identity))
+    {
+        // Found the object on the server
+    }
+    ```
+  </Tab>
+  <Tab title="From the client spawn table">
+    ```csharp
+    if (NetworkClient.spawned.TryGetValue(targetNetId, out NetworkIdentity identity))
+    {
+        // Found the object on the client
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Relationship to NetworkBehaviour
+
+`NetworkIdentity` is the parent; `NetworkBehaviour` components are the children. A single `NetworkIdentity` can have multiple `NetworkBehaviour` components:
+
+- Each `NetworkBehaviour` gets its own `ComponentIndex` (byte), which Mirror uses to route SyncVar and RPC messages to the correct component.
+- All `NetworkBehaviour`s on the same object share the same `netId` and `connectionToClient`.
+- `NetworkBehaviour` reads `isServer`, `isClient`, `netId`, and `isOwned` by delegating to `netIdentity`.
+
+```
+GameObject
+├── NetworkIdentity      ← assigns netId, manages observers, owns spawn state
+├── NetworkBehaviour A   ← ComponentIndex 0, owns its own SyncVars
+└── NetworkBehaviour B   ← ComponentIndex 1, owns its own SyncVars
+```
+
+<AccordionGroup>
+  <Accordion title="Can a child GameObject have its own NetworkIdentity?">
+    Yes, but with caveats. Mirror supports nested `NetworkIdentity` components as of recent versions. However, the child must still be registered and spawned separately. For most use cases it is simpler to keep one `NetworkIdentity` per top-level prefab root.
+  </Accordion>
+  <Accordion title="Why is netId 0 on my object?">
+    `netId` is `0` until `NetworkServer.Spawn` is called. If you're reading it in `Awake` or `Start` before the server spawns it, it will be `0`. Read it inside `OnStartServer` or `OnStartClient` instead.
+  </Accordion>
+  <Accordion title="What happens if I duplicate a prefab?">
+    Mirror automatically reassigns a new `assetId` to the duplicate. You will see the `assetId` field in the inspector update. Do not copy prefabs with git or outside Unity as the ID may become stale.
+  </Accordion>
+  <Accordion title="How do I hide an object from a specific client?">
+    Use an interest management component (e.g., `NetworkProximityChecker`) or set `visibility = Visibility.ForceHidden` temporarily. There is no per-client `ForceHidden`; the `ForceHidden` flag hides from all clients at once.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="NetworkBehaviour" icon="code" href="/concepts/network-behaviour">
+    Base class for all networked scripts
+  </Card>
+  <Card title="SyncVars and syncing" icon="arrows-rotate" href="/concepts/syncvars-and-syncing">
+    Sync fields and collections from server to clients
+  </Card>
+  <Card title="Remote calls" icon="arrow-right-arrow-left" href="/concepts/remote-calls">
+    Commands, ClientRpcs, and TargetRpcs
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/getting-started/quickstart">
+    Build your first networked scene
+  </Card>
+</CardGroup>

@@ -1,0 +1,271 @@
+---
+title: "SyncVars and Collections: State Replication in Mirror"
+description: "Master Mirror's sync tools: [SyncVar] with hook callbacks, SyncList, SyncDictionary, SyncSet, and custom OnSerialize for precise state replication."
+---
+
+Mirror's syncing system lets you declare which data should be replicated across the network without writing any serialization code by hand. The most common tool is the `[SyncVar]` attribute for individual fields. For collections, Mirror provides `SyncList<T>`, `SyncDictionary<TKey, TValue>`, and `SyncSet<T>`. For full control over the wire format, override `OnSerialize` and `OnDeserialize`.
+
+All sync types must be declared inside a class that extends `NetworkBehaviour`.
+
+## [SyncVar]
+
+Annotate any field with `[SyncVar]` to have Mirror automatically serialize it and send updates to clients whenever the value changes on the server:
+
+```csharp Health.cs
+public class Health : NetworkBehaviour
+{
+    [SyncVar] public int health = 100;
+    [SyncVar] public string playerName = "";
+    [SyncVar] public Color teamColor = Color.white;
+
+    [Server]
+    public void TakeDamage(int amount)
+    {
+        health -= amount;  // automatically synced to all clients
+    }
+}
+```
+
+`[SyncVar]` generates a backing property in the Weaver so that assignments on the server mark the field as dirty and schedule a sync. You do not need to call `SetDirty()` manually.
+
+### Sync direction
+
+By default, `[SyncVar]` follows the component's `syncDirection`, which defaults to `ServerToClient`. You can flip individual components to `ClientToServer` on the inspector if you want the owning client to drive state:
+
+```csharp
+// In inspector or at runtime on the component:
+syncDirection = SyncDirection.ClientToServer;
+```
+
+<Warning>
+With `ClientToServer`, the server receives the client's value but should still validate it before trusting it. The server's `OnDeserialize` runs on receipt, giving you a place to reject cheated values.
+</Warning>
+
+### Hook callbacks
+
+The `hook` parameter lets you register a method to run whenever the synced value changes on the receiving side:
+
+```csharp PlayerColor.cs
+public class PlayerColor : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnColorChanged))]
+    public Color bodyColor = Color.white;
+
+    // Signature: (oldValue, newValue)
+    void OnColorChanged(Color oldColor, Color newColor)
+    {
+        // Runs on the client when bodyColor is updated by the server.
+        // Also runs in host mode when the server itself changes it.
+        GetComponentInChildren<Renderer>().material.color = newColor;
+    }
+}
+```
+
+<Note>
+The hook is called on the **receiving** side, not where the change was made. On a pure server (non-host), the hook never fires for `ServerToClient` vars because the server is the sender. In host mode the hook fires immediately after assignment.
+</Note>
+
+Hook method signature must be `void MethodName(T oldValue, T newValue)` where `T` matches the field type.
+
+### Supported types
+
+`[SyncVar]` works with any type that Mirror can serialize:
+
+- C# primitives: `bool`, `byte`, `int`, `uint`, `long`, `float`, `double`, `string`
+- Unity types: `Vector2`, `Vector3`, `Quaternion`, `Color`, `Color32`, `Rect`, `Bounds`
+- `GameObject` and `NetworkIdentity` (serialized via `netId` — works across scenes)
+- Any struct or class with a custom `NetworkReader`/`NetworkWriter` extension method
+- Enums (serialized as their underlying integer type)
+
+<Warning>
+`[SyncVar]` does not support arrays, `List<T>`, or other collections. Use `SyncList`, `SyncSet`, or `SyncDictionary` for those.
+</Warning>
+
+## SyncList&lt;T&gt;
+
+`SyncList<T>` is a networked `IList<T>` that mirrors all insertions, removals, and assignments to clients. Declare it as a field (not a property) and initialize it inline:
+
+```csharp Inventory.cs
+public class Inventory : NetworkBehaviour
+{
+    public readonly SyncList<string> items = new SyncList<string>();
+
+    public override void OnStartClient()
+    {
+        // Subscribe to change events before the initial state arrives
+        items.OnAdd    += index => Debug.Log($"Added item at [{index}]");
+        items.OnRemove += (index, oldItem) => Debug.Log($"Removed {oldItem}");
+        items.OnSet    += (index, oldItem) => Debug.Log($"Replaced {oldItem}");
+        items.OnClear  += () => Debug.Log("Inventory cleared");
+
+        // Or catch everything in one callback:
+        items.Callback += (op, index, oldItem, newItem) =>
+        {
+            if (op == SyncList<string>.Operation.OP_ADD)
+                RefreshUI();
+        };
+    }
+
+    [Server]
+    public void AddItem(string item) => items.Add(item);
+
+    [Server]
+    public void RemoveItem(string item) => items.Remove(item);
+}
+```
+
+`SyncList<T>` sends only delta changes (not the full list) after the initial spawn snapshot, keeping bandwidth low even for large lists.
+
+## SyncDictionary&lt;TKey, TValue&gt;
+
+`SyncDictionary<TKey, TValue>` (backed by `SyncIDictionary<TKey, TValue>`) syncs a key-value store. Extend `SyncDictionary` with a concrete type alias for cleaner code:
+
+```csharp ScoreTracker.cs
+// Concrete subclass avoids generic syntax at the field declaration
+public class SyncPlayerScores : SyncDictionary<int, int> {}
+
+public class ScoreTracker : NetworkBehaviour
+{
+    public readonly SyncPlayerScores scores = new SyncPlayerScores();
+
+    public override void OnStartClient()
+    {
+        scores.OnAdd    += key => Debug.Log($"Player {key} joined scoreboard");
+        scores.OnSet    += (key, oldScore) => UpdateScoreUI(key);
+        scores.OnRemove += (key, score) => Debug.Log($"Player {key} left");
+        scores.OnChange += (op, key, value) => RefreshLeaderboard();
+    }
+
+    [Server]
+    public void SetScore(int connectionId, int score)
+    {
+        scores[connectionId] = score;
+    }
+}
+```
+
+`OnChange` fires for every operation. Use the granular callbacks (`OnAdd`, `OnSet`, `OnRemove`) when you want to react to specific operations.
+
+## SyncSet&lt;T&gt;
+
+`SyncSet<T>` is a networked `ISet<T>` — order is not guaranteed and duplicates are not allowed:
+
+```csharp StatusEffects.cs
+public class StatusEffects : NetworkBehaviour
+{
+    public readonly SyncSet<string> activeEffects = new SyncSet<string>(new HashSet<string>());
+
+    public override void OnStartClient()
+    {
+        activeEffects.OnAdd    += effect => ApplyVisual(effect);
+        activeEffects.OnRemove += effect => RemoveVisual(effect);
+        activeEffects.OnClear  += () => ClearAllVisuals();
+    }
+
+    [Server]
+    public void ApplyEffect(string effect) => activeEffects.Add(effect);
+
+    [Server]
+    public void RemoveEffect(string effect) => activeEffects.Remove(effect);
+}
+```
+
+## syncInterval and syncMode
+
+These `NetworkBehaviour` fields apply to all `[SyncVar]`s and sync collections on the component:
+
+```csharp
+// Send at most every 100ms instead of every frame
+syncInterval = 0.1f;
+
+// Only sync to the owner, not all observers
+syncMode = SyncMode.Owner;
+```
+
+`syncMode = SyncMode.Owner` is useful for private data such as inventory, quest state, or aim angles that only the owning client should receive.
+
+## Custom serialization with OnSerialize / OnDeserialize
+
+For advanced cases — custom binary formats, non-field data, or conditional serialization — override these methods directly:
+
+```csharp CustomSync.cs
+public class CustomSync : NetworkBehaviour
+{
+    // Managed outside [SyncVar]:
+    float _serverTimestamp;
+    int   _tickCount;
+
+    public override bool OnSerialize(NetworkWriter writer, bool initialState)
+    {
+        // initialState is true on first spawn, false for delta updates
+        writer.WriteFloat(_serverTimestamp);
+        writer.WriteInt(_tickCount);
+        return true; // return true = we wrote something
+    }
+
+    public override void OnDeserialize(NetworkReader reader, bool initialState)
+    {
+        _serverTimestamp = reader.ReadFloat();
+        _tickCount       = reader.ReadInt();
+    }
+}
+```
+
+<Note>
+If you override `OnSerialize`, Mirror will still handle `[SyncVar]` and sync collection serialization via generated code. Your override is merged with the generated output, so you do not need to replicate SyncVar serialization yourself.
+</Note>
+
+Call `SetDirty()` after changing values that live outside `[SyncVar]` to trigger `OnSerialize`:
+
+```csharp
+public void UpdateTimestamp(float t)
+{
+    if (!isServer) return;
+    _serverTimestamp = t;
+    SetDirty();
+}
+```
+
+## Limitations
+
+<AccordionGroup>
+  <Accordion title="SyncVar field cannot be a property">
+    `[SyncVar]` must be applied to a field, not a property. The Weaver generates a backing network property for each field at compile time. Applying the attribute to a `get`/`set` property will produce a compile error.
+  </Accordion>
+  <Accordion title="Maximum of 64 SyncVars per NetworkBehaviour">
+    Mirror tracks dirty state with a `ulong` bitmask — one bit per SyncVar. That limits you to 64 `[SyncVar]` fields per single `NetworkBehaviour` class. Split large components into multiple `NetworkBehaviour`s if you hit this limit.
+  </Accordion>
+  <Accordion title="SyncList must be readonly and initialized inline">
+    Sync collections must be declared `readonly` and initialized at the declaration site (not in `Awake` or `Start`). The Weaver registers them in the generated constructor, so they must exist when the constructor runs.
+
+    ```csharp
+    // Correct
+    public readonly SyncList<int> values = new SyncList<int>();
+
+    // Wrong — initialization too late
+    public readonly SyncList<int> values;
+    void Awake() { values = new SyncList<int>(); }
+    ```
+  </Accordion>
+  <Accordion title="Hooks do not fire on the sender side">
+    A hook only fires on the side that receives the sync message. If the server changes a `[SyncVar]`, the server's hook does not fire (except in host mode where the client side also runs). Design UI or sound effects in hooks to be client-side only.
+  </Accordion>
+  <Accordion title="ClientToServer SyncVars are only writable by the owner">
+    When `syncDirection` is `ClientToServer`, only the owning client (where `isOwned == true`) may modify the values. Non-owning clients and the server treat the fields as read-only and will see an `IsReadOnly` error if they try to write.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="NetworkBehaviour" icon="code" href="/concepts/network-behaviour">
+    Base class — lifecycle, sync settings, guard attributes
+  </Card>
+  <Card title="Remote calls" icon="arrow-right-arrow-left" href="/concepts/remote-calls">
+    Commands and RPCs for event-driven communication
+  </Card>
+  <Card title="NetworkIdentity" icon="fingerprint" href="/concepts/network-identity">
+    How objects are identified and owned across the network
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/getting-started/quickstart">
+    Build your first networked scene
+  </Card>
+</CardGroup>

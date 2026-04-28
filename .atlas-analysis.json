@@ -1,0 +1,103 @@
+{
+  "projectType": "framework",
+  "projectName": "Mirror Networking",
+  "projectDescription": "The #1 open source Unity networking library for building multiplayer games, providing a high-level API with transports, RPCs, SyncVars, and interest management.",
+  "theme": "maple",
+  "primaryColor": "#848484",
+  "lightColor": "#0c0c0c",
+  "darkColor": "#c5c5c4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "getting-started/installation",
+              "getting-started/quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/network-behaviour",
+              "concepts/network-identity",
+              "concepts/syncvars-and-syncing",
+              "concepts/remote-calls"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "components/network-manager",
+              "components/network-transform",
+              "components/network-animator",
+              "components/interest-management"
+            ]
+          },
+          {
+            "group": "Transports",
+            "pages": [
+              "transports/overview",
+              "transports/kcp",
+              "transports/telepathy",
+              "transports/websockets"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/authentication",
+              "advanced/snapshot-interpolation",
+              "advanced/lag-compensation",
+              "advanced/hosting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "NetworkBehaviour base class for multiplayer game objects",
+    "SyncVars for automatic state synchronization",
+    "Commands ([Command]) for client-to-server RPCs",
+    "ClientRpc / TargetRpc for server-to-client RPCs",
+    "Multiple transports: KCP, Telepathy, WebSockets, Steam, and more",
+    "Interest Management (Spatial Hashing, Distance Checker)",
+    "Snapshot Interpolation for smooth movement",
+    "Lag Compensation with server-side rollback",
+    "NetworkManager for connection lifecycle management",
+    "IL post-processing for zero-overhead remote calls",
+    "Allocation-free networking with no GC pressure",
+    "Built-in authentication system",
+    "Edgegap cloud hosting integration"
+  ],
+  "publicApiSurface": [
+    "NetworkBehaviour",
+    "NetworkManager",
+    "NetworkServer",
+    "NetworkClient",
+    "NetworkIdentity",
+    "NetworkConnection",
+    "[SyncVar]",
+    "[Command]",
+    "[ClientRpc]",
+    "[TargetRpc]",
+    "[Server]",
+    "[Client]",
+    "SyncList<T>",
+    "SyncDictionary<TKey, TValue>",
+    "SyncSet<T>",
+    "Transport",
+    "NetworkAuthenticator",
+    "NetworkTransform",
+    "NetworkAnimator",
+    "InterestManagement",
+    "NetworkReader",
+    "NetworkWriter",
+    "NetworkTime",
+    "NetworkDiagnostics"
+  ]
+}

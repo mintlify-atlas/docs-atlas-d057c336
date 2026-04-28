@@ -1,0 +1,256 @@
+---
+title: "Build Your First Multiplayer Game with Mirror Networking"
+description: "Create a networked player prefab with SyncVar, Command, and ClientRpc from scratch — from NetworkManager setup to spawning players and syncing state."
+---
+
+This guide walks you through creating the smallest possible multiplayer game: multiple players connect, each gets a spawned object, and their health value is synchronised across all clients. You will touch every core Mirror concept — `NetworkManager`, `NetworkIdentity`, `NetworkBehaviour`, `[SyncVar]`, `[Command]`, and `[ClientRpc]` — in about fifteen minutes.
+
+<Note>
+Complete the [installation guide](/getting-started/installation) before starting. You need Mirror imported and a Unity project open.
+</Note>
+
+## What you will build
+
+- A single scene with a `NetworkManager` that handles hosting and connecting
+- A player prefab with a `NetworkIdentity` and a custom `NetworkBehaviour`
+- A `[SyncVar]` that keeps each player's health in sync across all clients
+- A `[Command]` that lets the owning client tell the server to subtract health
+- A `[ClientRpc]` that notifies all clients when a player dies
+
+---
+
+## Setup
+
+<Steps>
+  <Step title="Create a new scene">
+    Create a new empty Unity scene (**File → New Scene → Empty**) and save it as `Game.unity`.
+  </Step>
+
+  <Step title="Add a NetworkManager">
+    In the **Hierarchy**, right-click and choose **Create Empty**. Rename it `NetworkManager`.
+
+    In the **Inspector**, click **Add Component** and add:
+    1. **Network Manager** (under Mirror)
+    2. **Kcp Transport** (under Mirror — the default UDP transport)
+
+    The Network Manager will automatically detect and use the Kcp Transport once both components are on the same GameObject.
+  </Step>
+
+  <Step title="Create the player prefab">
+    In the **Hierarchy**, right-click and choose **3D Object → Capsule**. Rename it `Player`.
+
+    In the **Inspector**, click **Add Component** and add **Network Identity**. This component is required on any object that Mirror will spawn or track over the network.
+
+    Then drag the `Player` GameObject from the **Hierarchy** into the **Project** window to create a prefab. Delete the original from the scene.
+  </Step>
+
+  <Step title="Assign the player prefab to NetworkManager">
+    Select the `NetworkManager` GameObject. In the **Inspector**, find the **Player Object** section and drag the `Player` prefab into the **Player Prefab** field.
+
+    Make sure **Auto Create Player** is checked — this tells Mirror to automatically spawn the player prefab for each connecting client.
+  </Step>
+
+  <Step title="Write the PlayerController script">
+    In the **Project** window, create a new C# script called `PlayerController` and paste the following code:
+
+    ```csharp PlayerController.cs
+    using UnityEngine;
+    using Mirror;
+
+    public class PlayerController : NetworkBehaviour
+    {
+        // [SyncVar] automatically syncs this field from server to all clients.
+        // When health changes on the server, every client receives the new value.
+        [SyncVar(hook = nameof(OnHealthChanged))]
+        public int health = 100;
+
+        // Called on every client (including the server in host mode) whenever
+        // the SyncVar 'health' changes. oldValue is the previous value.
+        void OnHealthChanged(int oldValue, int newValue)
+        {
+            Debug.Log($"{name} health changed from {oldValue} to {newValue}");
+        }
+
+        void Update()
+        {
+            // Only the owning client sends input.
+            if (!isLocalPlayer) return;
+
+            // Press Space to ask the server to apply 10 damage to this player.
+            if (Input.GetKeyDown(KeyCode.Space))
+            {
+                CmdTakeDamage(10);
+            }
+        }
+
+        // [Command] runs on the server. The client calls it, the server executes it.
+        // Validate and mutate authoritative state here — never trust raw client data.
+        [Command]
+        void CmdTakeDamage(int amount)
+        {
+            // Server-side validation: clamp damage to a reasonable range.
+            amount = Mathf.Clamp(amount, 0, 100);
+            health -= amount;
+
+            if (health <= 0)
+            {
+                health = 0;
+                RpcOnDied();
+            }
+        }
+
+        // [ClientRpc] runs on all connected clients (including the host).
+        // Use it to trigger effects or UI updates that every client should see.
+        [ClientRpc]
+        void RpcOnDied()
+        {
+            Debug.Log($"{name} has died!");
+            // Play a death animation, show UI, etc.
+        }
+
+        // OnStartLocalPlayer is called only on the client that owns this object.
+        // Use it to activate cameras, UI, or input that belongs to the local player.
+        public override void OnStartLocalPlayer()
+        {
+            Debug.Log("Local player spawned. Press Space to take damage.");
+        }
+    }
+    ```
+
+    Save the script, then select the `Player` prefab in the **Project** window and click **Add Component → PlayerController** to attach it.
+  </Step>
+
+  <Step title="Test in the Editor">
+    Press **Play**. The scene starts in offline mode. In the **Network Manager HUD** (visible in the Game view by default), click **Host (Server + Client)** to start a local host.
+
+    Your player spawns. Press **Space** — watch the Console: health decreases on the server and the `OnHealthChanged` hook fires on the client. Press Space ten times until health reaches 0 and you see the "has died!" log from `RpcOnDied`.
+  </Step>
+
+  <Step title="Test with a second client">
+    Build the project (**File → Build Settings → Build And Run**). Open the standalone build and click **Client** to connect to the host running in the Editor.
+
+    Both windows now show two player capsules. Press **Space** in either window — both see the health change because `[SyncVar]` broadcasts to all observers and `[ClientRpc]` runs on every client.
+  </Step>
+</Steps>
+
+---
+
+## How the pieces fit together
+
+### Server and client in one project
+
+Mirror runs the server and client as a **single Unity project**. You use `isServer`, `isClient`, and `isLocalPlayer` to branch logic at runtime instead of maintaining two separate codebases.
+
+```csharp
+void Update()
+{
+    if (isServer)  ServerTick();   // Only runs on the server
+    if (isClient)  ClientTick();   // Runs on all clients (including host)
+    if (isLocalPlayer) HandleInput(); // Only runs for the owning client
+}
+```
+
+### SyncVar
+
+`[SyncVar]` marks a field for automatic server-to-client synchronisation. When the value changes on the server, Mirror sends the delta to all observers.
+
+```csharp
+[SyncVar] public int health = 100;
+```
+
+Use the `hook` parameter to call a method when the value changes on the client side:
+
+```csharp
+[SyncVar(hook = nameof(OnHealthChanged))]
+public int health = 100;
+
+void OnHealthChanged(int oldValue, int newValue)
+{
+    healthBar.fillAmount = newValue / 100f;
+}
+```
+
+<Warning>
+Only mutate `[SyncVar]` fields **on the server**. Changing them on a client has no effect and will not be sent to other clients.
+</Warning>
+
+### Command
+
+`[Command]` lets the owning client invoke a method that runs on the server. Use commands for all player actions that modify authoritative game state.
+
+```csharp
+// Client calls this method locally...
+[Command]
+void CmdFire()
+{
+    // ...but this body runs on the server.
+    GameObject projectile = Instantiate(projectilePrefab, muzzle.position, muzzle.rotation);
+    NetworkServer.Spawn(projectile); // Spawn for all clients
+}
+```
+
+<Note>
+By convention, prefix Command method names with `Cmd` (e.g., `CmdFire`, `CmdMove`). This makes it clear at the call site that the method crosses the network.
+</Note>
+
+### ClientRpc
+
+`[ClientRpc]` lets the server invoke a method that runs on **all connected clients**. Use it to broadcast events that every player should react to — explosions, score updates, game state changes.
+
+```csharp
+[ClientRpc]
+void RpcPlayExplosion(Vector3 position)
+{
+    // Runs on every client that observes this object.
+    Instantiate(explosionVfxPrefab, position, Quaternion.identity);
+}
+```
+
+### TargetRpc
+
+When you only need to send an event to **one specific client** (the owner), use `[TargetRpc]`:
+
+```csharp
+[TargetRpc]
+void TargetShowSecretMessage(string message)
+{
+    // Only the owning client sees this message.
+    secretUI.text = message;
+}
+```
+
+---
+
+## Spawning objects at runtime
+
+To spawn a non-player object (a projectile, pickup, or NPC), call `NetworkServer.Spawn` on the server:
+
+```csharp
+[Command]
+void CmdSpawnProjectile()
+{
+    GameObject obj = Instantiate(projectilePrefab, transform.position, transform.rotation);
+    NetworkServer.Spawn(obj); // Replicates to all clients automatically
+}
+```
+
+The prefab must be registered in the NetworkManager's **Spawnable Prefabs** list (or have a `NetworkIdentity` and be registered via `NetworkClient.RegisterPrefab`). The player prefab is registered automatically.
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="NetworkBehaviour" icon="code" href="/concepts/network-behaviour">
+    Deep-dive into lifecycle callbacks, SyncMode, and SyncDirection
+  </Card>
+  <Card title="SyncVars and syncing" icon="arrows-rotate" href="/concepts/syncvars-and-syncing">
+    SyncList, SyncDictionary, SyncSet, and custom serializers
+  </Card>
+  <Card title="Remote calls" icon="tower-broadcast" href="/concepts/remote-calls">
+    Command, ClientRpc, TargetRpc, and ServerRpc patterns
+  </Card>
+  <Card title="Network Manager" icon="sliders" href="/components/network-manager">
+    Scene management, spawn positions, and authentication
+  </Card>
+</CardGroup>

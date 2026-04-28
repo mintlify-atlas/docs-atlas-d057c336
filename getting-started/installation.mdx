@@ -1,0 +1,126 @@
+---
+title: "Install Mirror Networking in Your Unity Project"
+description: "Step-by-step guide to adding Mirror to Unity 2019–6 via the Asset Store or Unity Package Manager, plus verification after installation."
+---
+
+Mirror is available through two official channels: the Unity Asset Store and the Unity Package Manager (UPM). Both methods install the same package; the Asset Store is the easiest path for most developers, while UPM suits teams that prefer version-pinned dependencies checked into source control.
+
+## Prerequisites
+
+Before installing, confirm your project meets these requirements:
+
+- **Unity 2019.4 LTS, 2020.3 LTS, 2021.3 LTS, 2022.3 LTS, or Unity 6** (6000.1+)
+- A Unity project with the **3D** or **3D URP/HDRP** template (2D works too)
+- An active internet connection for the initial download
+
+<Note>
+Mirror does not support Unity versions below 2019.4. If you are on an older version, you must upgrade your project first.
+</Note>
+
+## Installation
+
+<Tabs>
+  <Tab title="Asset Store">
+    <Steps>
+      <Step title="Open the Asset Store page">
+        Navigate to the [Mirror Asset Store listing](https://assetstore.unity.com/packages/tools/network/mirror-129321) in your browser, then click **Add to My Assets**. Sign in with your Unity ID if prompted.
+      </Step>
+      <Step title="Open Package Manager in Unity">
+        In the Unity Editor, go to **Window → Package Manager**. In the top-left dropdown, select **My Assets**.
+      </Step>
+      <Step title="Find and download Mirror">
+        Search for "Mirror" in the list. Select the Mirror package and click **Download**, then **Import**.
+      </Step>
+      <Step title="Import all assets">
+        In the Import dialog, leave all items checked and click **Import**. Unity will compile Mirror's scripts automatically — this takes a few seconds.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Package Manager (UPM)">
+    <Steps>
+      <Step title="Open Package Manager">
+        In the Unity Editor, go to **Window → Package Manager**.
+      </Step>
+      <Step title="Add package by Git URL">
+        Click the **+** button in the top-left corner and select **Add package from git URL**.
+
+        Enter the following URL and click **Add**:
+
+        ```
+        https://github.com/MirrorNetworking/Mirror.git#v89.0.0
+        ```
+
+        <Tip>
+          Replace `v89.0.0` with the [latest release tag](https://github.com/MirrorNetworking/Mirror/releases/latest) to pin a specific version, or omit the `#` fragment to always pull the latest commit on the default branch.
+        </Tip>
+      </Step>
+      <Step title="Wait for compilation">
+        Unity resolves and compiles the package automatically. Watch the progress bar at the bottom of the editor. The package is ready when the spinner disappears.
+      </Step>
+    </Steps>
+
+    Alternatively, add the entry directly to your project's `Packages/manifest.json`:
+
+    ```json Packages/manifest.json
+    {
+      "dependencies": {
+        "com.mirror-networking.mirror": "https://github.com/MirrorNetworking/Mirror.git#v89.0.0"
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Verify the installation
+
+After importing, confirm Mirror is set up correctly:
+
+<Steps>
+  <Step title="Check the Assembly Definition">
+    In the **Project** window, navigate to **Packages/Mirror/Core** (UPM) or **Assets/Mirror/Core** (Asset Store). You should see `Mirror.asmdef` — this is Mirror's assembly definition that makes its API available to your scripts.
+  </Step>
+  <Step title="Create a test NetworkManager">
+    In an empty scene, right-click the **Hierarchy** panel and choose **Create Empty**. Rename it `NetworkManager`. In the **Inspector**, click **Add Component** and search for **Network Manager** — you should see it appear under the Mirror namespace.
+
+    Add the component. Inspector should show fields for **Transport**, **Player Prefab**, **Max Connections**, and more.
+  </Step>
+  <Step title="Add a transport">
+    With the `NetworkManager` GameObject selected, click **Add Component** again and add **Kcp Transport** (the default, reliable UDP transport bundled with Mirror). The Network Manager inspector will detect it and populate the **Transport** field automatically.
+  </Step>
+  <Step title="Press Play">
+    Press **Play** in the Editor. The console should show no Mirror errors. You now have a working (but unconnected) server/client setup.
+  </Step>
+</Steps>
+
+<Note>
+If you see a compile error referencing `Mirror` or `UnityEngine.Networking`, check that you are not mixing Mirror with UNET (Unity's old networking). Remove any `using UnityEngine.Networking;` imports from your existing scripts.
+</Note>
+
+## Unity version compatibility
+
+| Unity Version | Status |
+|---|---|
+| Unity 2019.4 LTS | Supported |
+| Unity 2020.3 LTS | Supported |
+| Unity 2021.3 LTS | Supported |
+| Unity 2022.3 LTS | Supported |
+| Unity 6 (6000.1+) | Supported |
+
+<Warning>
+Non-LTS (Tech Stream) releases such as 2023.x are not officially tested. You may encounter issues; use an LTS version for production projects.
+</Warning>
+
+## Migrating from UNET
+
+If your project previously used Unity's built-in UNET (`UnityEngine.Networking`), follow the [Mirror Migration Guide](https://mirror-networking.gitbook.io/docs/general/migration-guide) before proceeding. Most classes map directly: `NetworkManager` → `Mirror.NetworkManager`, `NetworkBehaviour` → `Mirror.NetworkBehaviour`, and so on.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Build your first networked player object from scratch
+  </Card>
+  <Card title="NetworkBehaviour" icon="code" href="/concepts/network-behaviour">
+    Learn how NetworkBehaviour, SyncVars, and RPCs work
+  </Card>
+</CardGroup>

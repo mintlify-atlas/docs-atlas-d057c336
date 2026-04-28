@@ -1,0 +1,181 @@
+---
+title: "Mirror Transports: Pluggable Network Layers Guide"
+description: "Mirror's pluggable transport system lets you swap KCP, Telepathy, or WebSockets without changing game code. Compare built-in and community transport options."
+---
+
+Mirror separates high-level game networking from low-level packet delivery through a pluggable transport layer. Every message Mirror sends — SyncVars, RPCs, scene changes — passes through the active transport, which is responsible for the actual send and receive operations. You can swap the transport at any time without changing your game code.
+
+## What a transport does
+
+A transport in Mirror is a `MonoBehaviour` that extends the abstract `Transport` class. It exposes two independent surfaces: a **client** side for connecting to servers and a **server** side for listening to incoming connections. Mirror's `NetworkManager` calls into these at the right point in the Unity loop:
+
+- **EarlyUpdate** — process incoming messages before the game world updates
+- **LateUpdate** — flush outgoing messages after the game world updates
+
+This ordering ensures that your game code always sees the latest state and that outgoing data is sent after all state changes are applied.
+
+The transport contract requires that every connection eventually raises either a connected or a disconnected event — it cannot remain in limbo. Transports are also responsible for calling `OnDisconnected` on timeout.
+
+## Swapping transports on the NetworkManager
+
+<Steps>
+  <Step title="Select your NetworkManager GameObject">
+    In the Unity Hierarchy, select the GameObject that has the **Network Manager** component attached.
+  </Step>
+  <Step title="Remove the existing transport component">
+    In the Inspector, find the current transport component (for example, **Kcp Transport**) and remove it using the component context menu.
+  </Step>
+  <Step title="Add the new transport component">
+    Click **Add Component** and search for your desired transport (for example, **Telepathy Transport** or **Simple Web Transport**).
+  </Step>
+  <Step title="Assign it to the NetworkManager">
+    In the **Network Manager** component, drag the new transport component into the **Transport** field. If the field is missing, set it via script: `NetworkManager.singleton.transport = GetComponent<YourTransport>()`.
+  </Step>
+</Steps>
+
+<Note>
+Only one transport can be active at a time unless you use the **Multiplex** middleware transport, which fans out across multiple underlying transports simultaneously.
+</Note>
+
+## Built-in transports
+
+Mirror ships three transports out of the box. They cover the most common platforms and use cases without any additional installation.
+
+<CardGroup cols={3}>
+  <Card title="KCP (default)" icon="bolt" href="/transports/kcp">
+    Reliable UDP over the kcp2k library. Low latency and the default choice for most games. Not available on WebGL.
+  </Card>
+  <Card title="Telepathy" icon="network-wired" href="/transports/telepathy">
+    TCP transport with a simple, robust message framing protocol. Available everywhere except WebGL. Good for turn-based and text-heavy games.
+  </Card>
+  <Card title="SimpleWebTransport" icon="globe" href="/transports/websockets">
+    WebSocket transport. The only built-in transport that works in the browser. Required for WebGL builds.
+  </Card>
+</CardGroup>
+
+## Community transports
+
+The Mirror community maintains additional transports for specialized platforms and relay services. Add them to your project by importing the corresponding package.
+
+| Transport | Protocol | Use case |
+|-----------|----------|----------|
+| [Ignorance](https://github.com/SoftwareGuy/Ignorance/) | ENET UDP | High-performance UDP alternative to KCP, with its own reliability layer |
+| [LiteNetLib](https://github.com/MirrorNetworking/LiteNetLibTransport/) | UDP | Lightweight UDP with built-in reliability |
+| [FizzySteam](https://github.com/Chykary/FizzySteamworks/) | Steam Networking | Routes traffic through Valve's Steam relay network using the Steamworks SDK |
+| [FizzyFacepunch](https://github.com/Chykary/FizzyFacepunch/) | Steam Networking | Same as FizzySteam but uses the Facepunch.Steamworks wrapper |
+| [Edgegap Relay](https://mirror-networking.gitbook.io/docs/hosting/edgegap-hosting-plugin-guide) | Relay | Cloud relay that removes the need for port forwarding; integrates with Edgegap's hosting plugin |
+| [Epic Relay](https://github.com/WeLoveJesusChrist/EOSTransport) | EOS Relay | Routes traffic through Epic Online Services |
+| [Light Reflective Mirror](https://github.com/Derek-R-S/Light-Reflective-Mirror) | Self-hosted relay | Self-hosted relay server for NAT traversal |
+
+## Middleware transports
+
+Middleware transports wrap an existing transport and add behavior on top of it. They do not replace the underlying transport — they decorate it.
+
+### Encryption transport
+
+`EncryptionTransport` wraps any other transport and applies end-to-end **AES-256-GCM** encryption to all traffic. The cipher is negotiated during the connection handshake. The server can optionally load a persistent key pair from a JSON file so clients can pin the server's public key fingerprint.
+
+```csharp
+// EncryptionTransport reports its cipher via Transport.EncryptionCipher
+public override string EncryptionCipher => "AES256-GCM";
+```
+
+### Latency simulation transport
+
+`LatencySimulation` wraps any other transport and introduces artificial latency, jitter, and packet loss. It is intended for local development and QA testing — never ship it in a production build.
+
+Configurable properties on the component:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `latency` | 100 ms | Base one-way latency added to all channels |
+| `jitter` | 0.02 | Perlin-noise jitter multiplier |
+| `jitterSpeed` | 1 | How fast the jitter noise oscillates |
+| `unreliableLoss` | 2% | Percentage of unreliable packets to drop |
+| `unreliableScramble` | 2% | Percentage of unreliable packets to reorder |
+
+<Warning>
+`LatencySimulation` applies latency to **both** reliable and unreliable channels. This is intentional — simulating latency on only one channel would produce hard-to-diagnose prediction and interpolation artifacts.
+</Warning>
+
+### Multiplex transport
+
+`MultiplexTransport` lets the server listen on multiple transports simultaneously. Clients connect via whichever transport their platform supports. A common pattern is pairing KCP (for desktop) with SimpleWebTransport (for WebGL) so the same server handles both native and browser clients.
+
+```
+NetworkManager
+  └─ MultiplexTransport
+       ├─ KcpTransport        (desktop clients, port 7777)
+       └─ SimpleWebTransport  (WebGL clients, port 27777)
+```
+
+## Transport comparison
+
+<Tabs>
+  <Tab title="Built-in transports">
+
+| Transport | Protocol | Reliability | Channels | WebGL | Default port |
+|-----------|----------|-------------|----------|-------|--------------|
+| `KcpTransport` | UDP (KCP) | Reliable + Unreliable | 2 | No | 7777 |
+| `TelepathyTransport` | TCP | Reliable only | 1 | No | 7777 |
+| `SimpleWebTransport` | WebSocket | Reliable only | 1 | Yes | 27777 |
+
+  </Tab>
+  <Tab title="When to use each">
+
+| Scenario | Recommended transport |
+|----------|-----------------------|
+| Fast-paced action game (shooter, racing) | KCP — low latency UDP with optional unreliable channel |
+| Turn-based game, card game, text MMO | Telepathy — TCP is simple and reliable enough |
+| Browser / WebGL game | SimpleWebTransport — the only option that works in browsers |
+| Steam game with no port-forwarding friction | FizzySteam or FizzyFacepunch |
+| Server requires encryption at the transport level | EncryptionTransport wrapping KCP |
+| Desktop + browser with same server | MultiplexTransport with KCP + SimpleWebTransport |
+
+  </Tab>
+</Tabs>
+
+## Writing a custom transport
+
+Extend the abstract `Transport` class and implement all abstract members. Mirror calls your transport from the main thread, so background threads must be managed internally by your transport.
+
+```csharp
+using Mirror;
+using System;
+using UnityEngine;
+
+public class MyTransport : Transport
+{
+    public override bool Available() => true;
+
+    // Client
+    public override bool ClientConnected() => /* ... */;
+    public override void ClientConnect(string address) { /* ... */ }
+    public override void ClientSend(ArraySegment<byte> segment, int channelId) { /* ... */ }
+    public override void ClientDisconnect() { /* ... */ }
+
+    // Server
+    public override Uri ServerUri() => /* ... */;
+    public override bool ServerActive() => /* ... */;
+    public override void ServerStart() { /* ... */ }
+    public override void ServerSend(int connectionId, ArraySegment<byte> segment, int channelId) { /* ... */ }
+    public override void ServerDisconnect(int connectionId) { /* ... */ }
+    public override string ServerGetClientAddress(int connectionId) => /* ... */;
+    public override void ServerStop() { /* ... */ }
+
+    // Required: max message size for each channel
+    public override int GetMaxPacketSize(int channelId = Channels.Reliable) => 1200;
+
+    public override void Shutdown() { /* ... */ }
+}
+```
+
+<Tip>
+Use `ClientEarlyUpdate` / `ServerEarlyUpdate` for incoming message processing and `ClientLateUpdate` / `ServerLateUpdate` for outgoing message flushing. Avoid overriding Unity's `Update` or `LateUpdate` — the base `Transport` class blocks them to prevent accidental misuse.
+</Tip>
+
+Key requirements for a well-behaved transport:
+
+- After `ClientConnect` is called, **always** invoke either `OnClientConnected` or `OnClientDisconnected` — never leave the connection in an unresolved state.
+- Call `OnClientDisconnected` / `OnServerDisconnected` on timeout; expose a configurable timeout value.
+- `GetMaxPacketSize` must return a valid value at all times, even before the transport is running, because Mirror uses it during initialization.

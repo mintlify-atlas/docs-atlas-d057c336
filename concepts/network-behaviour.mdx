@@ -1,0 +1,257 @@
+---
+title: "NetworkBehaviour: Base Class for Networked Scripts"
+description: "Learn how NetworkBehaviour works as the foundation for all networked Unity components, including lifecycle hooks, sync settings, and server/client guards."
+---
+
+`NetworkBehaviour` is the base class for every script that participates in Mirror's networking. Instead of extending `MonoBehaviour`, you extend `NetworkBehaviour` to gain access to SyncVars, remote procedure calls, lifecycle callbacks, and context-checking properties that let your code respond correctly on server, client, and host alike.
+
+Every `NetworkBehaviour` must live on a `GameObject` that also has a `NetworkIdentity` component — either on the same object or on a parent.
+
+## Context properties
+
+Mirror runs the same project binary as both server and client. These boolean properties let you branch logic correctly at runtime:
+
+| Property | Description |
+|---|---|
+| `isServer` | `true` if the object is spawned on the server (or host) |
+| `isClient` | `true` if the object was spawned on a client |
+| `isHost` | `true` in host mode (`isServer && isClient`) |
+| `isLocalPlayer` | `true` on the client for the local player's own object |
+| `isOwned` | `true` on the client for objects owned by this connection |
+| `isServerOnly` | `true` on a dedicated server (not host) |
+| `isClientOnly` | `true` on a pure client (not host) |
+| `authority` | `true` if this component is allowed to write state (depends on `syncDirection` and ownership) |
+
+```csharp Player.cs
+public class Player : NetworkBehaviour
+{
+    void Update()
+    {
+        // Server-authoritative movement
+        if (isServer)
+            ServerTick();
+
+        // Visual effects only on clients
+        if (isClient)
+            UpdateAnimations();
+
+        // Input only for the local player
+        if (isLocalPlayer)
+            ReadInput();
+    }
+}
+```
+
+<Warning>
+Do not cache `isServer` or `isClient` in `Awake`. These values are set by Mirror during spawn and may still be `false` inside `Awake`. Read them in `Start` or later lifecycle callbacks.
+</Warning>
+
+## Lifecycle callbacks
+
+Override these virtual methods instead of `Start` and `OnDestroy` whenever you need to react to network events:
+
+```csharp Enemy.cs
+public class Enemy : NetworkBehaviour
+{
+    public override void OnStartServer()
+    {
+        // Runs on the server when this object is spawned.
+        // Safe to initialize server-side state here.
+        InvokeRepeating(nameof(ServerThink), 0, 0.1f);
+    }
+
+    public override void OnStartClient()
+    {
+        // Runs on the client when this object is spawned.
+        // Safe to read SyncVar values here.
+        GetComponent<Renderer>().material.color = teamColor;
+    }
+
+    public override void OnStartLocalPlayer()
+    {
+        // Only runs for the local player object.
+        Camera.main.GetComponent<CameraFollow>().target = transform;
+    }
+
+    public override void OnStartAuthority()
+    {
+        // Runs when this client gains authority over the object.
+        EnableInputHandling();
+    }
+
+    public override void OnStopServer()  { /* cleanup on server */ }
+    public override void OnStopClient()  { /* cleanup on client */ }
+    public override void OnStopLocalPlayer() { /* cleanup local player */ }
+    public override void OnStopAuthority()   { /* cleanup authority */ }
+}
+```
+
+<Tip>
+Prefer `OnStartServer` / `OnStartClient` over `Start` for any logic that depends on the network state. `Start` runs before Mirror sets `isServer` or `isClient`.
+</Tip>
+
+## Sync settings
+
+Three inspector-visible fields control how and when state is synchronized:
+
+### syncDirection
+
+```csharp
+public SyncDirection syncDirection = SyncDirection.ServerToClient;
+```
+
+| Value | Meaning |
+|---|---|
+| `ServerToClient` | Server owns state and sends it to clients (default, most games) |
+| `ClientToServer` | Owning client sends state to server; server broadcasts to others |
+
+Use `ClientToServer` for things like player transform in competitive games where latency matters. The server still receives the data first and can reject it.
+
+### syncMode
+
+```csharp
+public SyncMode syncMode = SyncMode.Observers;
+```
+
+| Value | Meaning |
+|---|---|
+| `Observers` | Sync to all observers (everyone who can see the object) |
+| `Owner` | Sync only to the owner connection |
+
+Use `Owner` for private data such as inventory or health bars that should not be broadcast to enemies.
+
+### syncInterval
+
+```csharp
+[Range(0, 2)]
+public float syncInterval = 0;
+```
+
+Minimum seconds between sync sends. `0` means "send as soon as something is dirty." Values like `0.1` reduce bandwidth for objects that change frequently but don't need per-frame accuracy.
+
+### syncMethod
+
+```csharp
+public SyncMethod syncMethod = SyncMethod.Reliable;
+```
+
+| Value | When to use |
+|---|---|
+| `Reliable` | Default. Sends only when dirty, guaranteed delivery. Best for most games. |
+| `Hybrid` | Quake-style unreliable baseline + delta. Use for hardcore competitive games where throughput matters more than guarantee. |
+
+## Server and client guards
+
+<Tabs>
+  <Tab title="[Server] attribute">
+    Annotate a method with `[Server]` to print a warning and skip execution if called on the client:
+
+    ```csharp
+    [Server]
+    void ApplyDamage(int amount)
+    {
+        // Only runs on the server. Warning logged on client.
+        health -= amount;
+    }
+    ```
+  </Tab>
+  <Tab title="[Client] attribute">
+    Annotate a method with `[Client]` to print a warning and skip execution if called on the server:
+
+    ```csharp
+    [Client]
+    void ShowDeathScreen()
+    {
+        // Only runs on the client. Warning logged on server.
+        deathUI.SetActive(true);
+    }
+    ```
+  </Tab>
+  <Tab title="[ServerCallback]">
+    Same as `[Server]` but silently skips without logging a warning. Use for callbacks that Unity naturally calls on both sides (e.g., `OnTriggerEnter`):
+
+    ```csharp
+    [ServerCallback]
+    void OnTriggerEnter(Collider other)
+    {
+        // No warning spam when Unity fires this on clients.
+        ProcessPickup(other);
+    }
+    ```
+  </Tab>
+  <Tab title="[ClientCallback]">
+    Same as `[Client]` but silently skips. Use for Unity callbacks that fire everywhere:
+
+    ```csharp
+    [ClientCallback]
+    void OnParticleCollision(GameObject other)
+    {
+        SpawnImpactEffect(other.transform.position);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+These attributes use the Weaver (IL post-processor) to inject the guard at compile time — there is no runtime reflection overhead.
+</Note>
+
+## Manual dirty marking
+
+When you modify data that isn't a `[SyncVar]` or sync collection but you override `OnSerialize`, call `SetDirty()` to trigger a sync on the next send interval:
+
+```csharp
+public void SetTeamColor(Color color)
+{
+    if (!isServer) return;
+    _teamColor = color;
+    SetDirty(); // schedules OnSerialize to run
+}
+```
+
+You can also check and clear dirty state manually:
+
+```csharp
+bool dirty = IsDirty();       // true if dirty AND syncInterval has elapsed
+ClearAllDirtyBits();          // resets all dirty bits and sync timer
+```
+
+## Other useful members
+
+| Member | Description |
+|---|---|
+| `netId` | The unique network ID inherited from `NetworkIdentity` |
+| `netIdentity` | Reference to the `NetworkIdentity` on this GameObject |
+| `connectionToClient` | Server-side connection to the owning client (player objects only) |
+| `connectionToServer` | Client-side connection to the server (local player only) |
+| `ComponentIndex` | Index of this component among all `NetworkBehaviour`s on the object |
+
+<AccordionGroup>
+  <Accordion title="Why doesn't my code run in OnStartServer?">
+    Make sure you override the method with `public override void OnStartServer()`. A `private` or missing `override` keyword means Mirror won't call it. Also ensure `NetworkServer.Spawn` has been called for the object.
+  </Accordion>
+  <Accordion title="isServer is false in Awake — why?">
+    Mirror sets `isServer` and `isClient` after the object is spawned, which happens after `Awake`. Move network-dependent initialization to `OnStartServer` or `OnStartClient`.
+  </Accordion>
+  <Accordion title="Can I have multiple NetworkBehaviours on one object?">
+    Yes. Each one gets its own `ComponentIndex` and independent `syncDirection`, `syncMode`, and `syncInterval` settings. They all share the same `NetworkIdentity` and `netId`.
+  </Accordion>
+  <Accordion title="What's the difference between isOwned and authority?">
+    `isOwned` is true on the client for any object owned by this connection. `authority` also considers `syncDirection`: on the server it is always true for `ServerToClient` components, and on the client it is only true for `ClientToServer` + owned objects.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="NetworkIdentity" icon="fingerprint" href="/concepts/network-identity">
+    Understand the unique identity component every networked prefab needs
+  </Card>
+  <Card title="SyncVars and syncing" icon="arrows-rotate" href="/concepts/syncvars-and-syncing">
+    Automatically sync fields and collections across the network
+  </Card>
+  <Card title="Remote calls" icon="arrow-right-arrow-left" href="/concepts/remote-calls">
+    Use Commands, ClientRpcs, and TargetRpcs between server and clients
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/getting-started/quickstart">
+    Set up a basic networked scene from scratch
+  </Card>
+</CardGroup>
